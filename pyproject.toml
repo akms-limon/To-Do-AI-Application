@@ -3,6 +3,7 @@ name = "to-do-ai-application"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "chromadb>=1.5.9",
     "fastapi>=0.162.0",
     "langchain-groq>=1.1.3",
     "pydantic>=2.14.1",
