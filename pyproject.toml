@@ -2,4 +2,8 @@
 name = "to-do-ai-application"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.162.0",
+    "pydantic>=2.14.1",
+    "uvicorn>=0.54.0",
+]
