@@ -1,13 +1,17 @@
 from contextlib import asynccontextmanager
-from typing import Annotated
 from pathlib import Path as FilePath
+from typing import Annotated
 
+from fastapi import FastAPI, HTTPException, Path, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from fastapi import FastAPI, HTTPException, Path, Response
-
 from app import repository
+from app.chat_service import (
+    ChatRequest,
+    ChatServiceError,
+    handle_chat,
+)
 from app.database import initialize_database
 from app.schemas import TaskCreate, TaskUpdate
 
@@ -33,17 +37,28 @@ app.mount(
     name="static",
 )
 
+TaskId = Annotated[int, Path(gt=0)]
+
 
 @app.get("/", include_in_schema=False)
 def homepage():
     return FileResponse(STATIC_DIRECTORY / "index.html")
 
-TaskId = Annotated[int, Path(gt=0)]
-
 
 @app.get("/api/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.post("/api/chat")
+def chat(payload: ChatRequest):
+    try:
+        return handle_chat(payload)
+    except ChatServiceError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=error.detail,
+        ) from error
 
 
 @app.post("/api/tasks", status_code=201)
@@ -78,9 +93,7 @@ def update_task(task_id: TaskId, payload: TaskUpdate):
 
 @app.delete("/api/tasks/{task_id}", status_code=204)
 def delete_task(task_id: TaskId):
-    deleted = repository.delete_task(task_id)
-
-    if not deleted:
+    if not repository.delete_task(task_id):
         raise HTTPException(status_code=404, detail="Task not found.")
 
     return Response(status_code=204)

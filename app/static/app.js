@@ -5,6 +5,7 @@ const refreshButton = document.querySelector("#refresh-button");
 const messages = document.querySelector("#messages");
 const chatForm = document.querySelector("#chat-form");
 const messageInput = document.querySelector("#message-input");
+const sendButton = chatForm.querySelector('button[type="submit"]');
 
 const statusLabels = {
   to_do: "To do",
@@ -18,18 +19,40 @@ const priorityLabels = {
   high: "High",
 };
 
-function addMessage(text, role) {
-  const message = document.createElement("div");
+const THREAD_KEY = "taskflow-thread";
+const PENDING_KEY = "taskflow-pending-message";
 
-  message.classList.add(
+let threadId = sessionStorage.getItem(THREAD_KEY);
+
+if (!threadId) {
+  threadId = crypto.randomUUID();
+  sessionStorage.setItem(THREAD_KEY, threadId);
+}
+
+let pendingRequest = null;
+let sending = false;
+
+try {
+  pendingRequest = JSON.parse(
+    sessionStorage.getItem(PENDING_KEY) || "null"
+  );
+} catch {
+  sessionStorage.removeItem(PENDING_KEY);
+}
+
+function addMessage(text, role) {
+  const element = document.createElement("div");
+
+  element.classList.add(
     "message",
     role === "user" ? "user-message" : "assistant-message"
   );
 
-  // Treat user and task content as text, never executable HTML.
-  message.textContent = text;
-  messages.append(message);
+  element.textContent = text;
+  messages.append(element);
   messages.scrollTop = messages.scrollHeight;
+
+  return element;
 }
 
 function createTaskCard(task) {
@@ -87,7 +110,7 @@ async function loadTasks() {
     const response = await fetch("/api/tasks");
 
     if (!response.ok) {
-      throw new Error(`Request failed with status ${response.status}`);
+      throw new Error(`Task request failed: ${response.status}`);
     }
 
     const tasks = await response.json();
@@ -96,27 +119,104 @@ async function loadTasks() {
       throw new Error("Unexpected task response");
     }
 
-    const cards = tasks.map(createTaskCard);
-    taskList.replaceChildren(...cards);
+    taskList.replaceChildren(...tasks.map(createTaskCard));
 
     taskCount.textContent =
       `${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}`;
 
     boardStatus.textContent = tasks.length
       ? ""
-      : "No tasks yet. Create one through the API docs for now.";
+      : "No tasks yet. Ask the assistant to create one.";
   } catch (error) {
     boardStatus.classList.add("error");
     boardStatus.textContent =
-      "Could not refresh tasks. Any displayed tasks may be outdated. Try again.";
-    console.error("Task loading failed:", error);
+      "Could not refresh tasks. Displayed tasks may be outdated.";
+    console.error(error);
   } finally {
     refreshButton.disabled = false;
   }
 }
 
-chatForm.addEventListener("submit", (event) => {
+function updateComposer() {
+  messageInput.disabled = sending || pendingRequest !== null;
+  sendButton.disabled = sending;
+  sendButton.textContent = sending
+    ? "Working…"
+    : pendingRequest
+      ? "Retry"
+      : "Send";
+}
+
+async function submitPendingRequest() {
+  if (sending || !pendingRequest) {
+    return;
+  }
+
+  sending = true;
+  updateComposer();
+
+  const progress = addMessage("Working on your request…", "assistant");
+
+  try {
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(pendingRequest),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      progress.textContent =
+        typeof data.detail === "string"
+          ? data.detail
+          : "The server rejected this request. Check the API input.";
+
+      // Retain the original request ID. A retry must not become a new mutation.
+      return;
+    }
+
+    if (typeof data.reply !== "string") {
+      throw new Error("Unexpected chat response");
+    }
+
+    progress.textContent = data.reply;
+
+    pendingRequest = null;
+    sessionStorage.removeItem(PENDING_KEY);
+
+    messageInput.placeholder =
+      data.status === "clarification"
+        ? "Answer the question, or type cancel"
+        : "Describe your next task instruction";
+  } catch (error) {
+    progress.textContent =
+      "The response could not be received. Click Retry to resend the same " +
+      "message ID. Do not submit the operation as a new message.";
+
+    console.error(error);
+  } finally {
+    sending = false;
+    updateComposer();
+    await loadTasks();
+
+    if (!pendingRequest) {
+      messageInput.focus();
+    }
+  }
+}
+
+chatForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+
+  if (sending) {
+    return;
+  }
+
+  if (pendingRequest) {
+    await submitPendingRequest();
+    return;
+  }
 
   const text = messageInput.value.trim();
 
@@ -126,15 +226,21 @@ chatForm.addEventListener("submit", (event) => {
     return;
   }
 
+  pendingRequest = {
+    thread_id: threadId,
+    message_id: crypto.randomUUID(),
+    message: text,
+  };
+
+  sessionStorage.setItem(
+    PENDING_KEY,
+    JSON.stringify(pendingRequest)
+  );
+
   addMessage(text, "user");
   messageInput.value = "";
 
-  addMessage(
-    "Chat execution is not connected yet. Your message has not changed any tasks.",
-    "assistant"
-  );
-
-  messageInput.focus();
+  await submitPendingRequest();
 });
 
 messageInput.addEventListener("input", () => {
@@ -143,9 +249,19 @@ messageInput.addEventListener("input", () => {
 
 refreshButton.addEventListener("click", loadTasks);
 
-addMessage(
-  "Welcome to TaskFlow. Your saved tasks appear on the board. AI chat will be connected in a later step.",
-  "assistant"
-);
+if (pendingRequest) {
+  addMessage(
+    "An unanswered submission was restored. Click Retry to retrieve or " +
+    "complete that same request before sending another.",
+    "assistant"
+  );
+} else {
+  addMessage(
+    "Welcome to TaskFlow. Ask me to create, update, list, or search tasks. " +
+    "If I need clarification, reply here.",
+    "assistant"
+  );
+}
 
+updateComposer();
 loadTasks();
