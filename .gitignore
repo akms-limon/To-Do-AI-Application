@@ -1,0 +1,16 @@
+# Local environment and secrets
+.venv/
+.env
+.env.*
+!.env.example
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+
+# Runtime databases and vector storage
+data/
+
+# Local tooling
+.pytest_cache/
+.ruff_cache/
