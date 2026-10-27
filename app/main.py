@@ -1,5 +1,9 @@
 from contextlib import asynccontextmanager
 from typing import Annotated
+from pathlib import Path as FilePath
+
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from fastapi import FastAPI, HTTPException, Path, Response
 
@@ -20,6 +24,19 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+STATIC_DIRECTORY = FilePath(__file__).resolve().parent / "static"
+
+app.mount(
+    "/static",
+    StaticFiles(directory=str(STATIC_DIRECTORY)),
+    name="static",
+)
+
+
+@app.get("/", include_in_schema=False)
+def homepage():
+    return FileResponse(STATIC_DIRECTORY / "index.html")
 
 TaskId = Annotated[int, Path(gt=0)]
 

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TaskFlow</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <h1>TASKFLOW</h1>
+      <span>AI TASK MANAGER</span>
+    </header>
+
+    <main class="layout">
+      <section aria-labelledby="tasks-heading">
+        <h2 id="tasks-heading">My tasks</h2>
+        <p class="subtitle">Organize tasks through your AI assistant.</p>
+
+        <div class="board">
+          <div class="board-header">
+            <h3>Task board</h3>
+            <div class="board-controls">
+              <span id="task-count">0 tasks</span>
+              <button id="refresh-button" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <p id="board-status" role="status"></p>
+          <ul id="task-list" class="task-list"></ul>
+        </div>
+      </section>
+
+      <section class="assistant" aria-labelledby="assistant-heading">
+        <h2 id="assistant-heading">AI Assistant</h2>
+        <p class="subtitle">Describe what you want to do.</p>
+
+        <div
+          id="messages"
+          class="messages"
+          role="log"
+          aria-label="Conversation"
+          aria-live="polite"
+        ></div>
+
+        <form id="chat-form" class="chat-form">
+          <label for="message-input">Your instruction</label>
+          <textarea
+            id="message-input"
+            placeholder="Create a high-priority task to finish the demo"
+            rows="3"
+            maxlength="2000"
+            required
+          ></textarea>
+          <button type="submit">Send</button>
+        </form>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
