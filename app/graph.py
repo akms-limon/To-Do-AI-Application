@@ -1,5 +1,8 @@
 from typing import TypedDict
+from pydantic import ValidationError
 
+from app.action_validation import validate_action
+from app.task_resolver import RequestCancelled, resolve_target
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
@@ -12,6 +15,7 @@ class AgentState(TypedDict):
     proposal: dict | None
     reply: str
     cancelled: bool
+    prepared_actions: list[dict]
 
 
 def interpret_node(state: AgentState):
@@ -33,10 +37,15 @@ def interpret_node(state: AgentState):
 
 
 def route_interpretation(state: AgentState):
-    if state["proposal"]["outcome"] == "clarify":
+    outcome = state["proposal"]["outcome"]
+
+    if outcome == "clarify":
         return "clarify"
 
-    return "finish"
+    if outcome == "unsupported":
+        return "finish"
+
+    return "prepare"
 
 
 def clarify_node(state: AgentState):
@@ -83,23 +92,21 @@ def finish_node(state: AgentState):
     if state["cancelled"]:
         return {"reply": "Cancelled. No tasks were changed."}
 
-    proposal = state["proposal"]
-
-    if proposal["outcome"] == "unsupported":
-        return {"reply": proposal["message"]}
+    if state["proposal"]["outcome"] == "unsupported":
+        return {"reply": state["proposal"]["message"]}
 
     return {
         "reply": (
-            "Proposal prepared. Task lookup and execution "
-            "are not connected yet."
+            "Actions validated and targets resolved. "
+            "This is still a preview; no tasks were changed."
         )
     }
-
 
 def build_graph(checkpointer):
     builder = StateGraph(AgentState)
 
     builder.add_node("interpret", interpret_node)
+    builder.add_node("prepare", prepare_node)
     builder.add_node("clarify", clarify_node)
     builder.add_node("finish", finish_node)
 
@@ -108,6 +115,16 @@ def build_graph(checkpointer):
     builder.add_conditional_edges(
         "interpret",
         route_interpretation,
+        {
+            "clarify": "clarify",
+            "prepare": "prepare",
+            "finish": "finish",
+        },
+    )
+
+    builder.add_conditional_edges(
+        "prepare",
+        route_preparation,
         {
             "clarify": "clarify",
             "finish": "finish",
@@ -126,3 +143,72 @@ def build_graph(checkpointer):
     builder.add_edge("finish", END)
 
     return builder.compile(checkpointer=checkpointer)
+
+def prepare_node(state: AgentState):
+    try:
+        # Validate the entire batch before asking target-selection questions.
+        actions = [
+            validate_action(raw)
+            for raw in state["proposal"]["actions"]
+        ]
+
+        prepared = []
+
+        for action in actions:
+            if action["operation"] in {"update_task", "delete_task"}:
+                task = resolve_target(action)
+
+                action = {
+                    **action,
+                    "task_id": task["id"],
+                    "target_query": None,
+                    "expected_version": task["version"],
+                    "resolved_title": task["title"],
+                }
+
+            prepared.append(action)
+
+        return {
+            "prepared_actions": prepared,
+            "reply": "Actions validated and targets resolved. Nothing executed.",
+        }
+
+    except RequestCancelled:
+        return {
+            "cancelled": True,
+            "prepared_actions": [],
+            "proposal": None,
+            "history": [],
+            "reply": "Cancelled. No tasks were changed.",
+        }
+
+    except (ValidationError, ValueError) as error:
+        if isinstance(error, ValidationError):
+            details = "; ".join(
+                item["msg"]
+                for item in error.errors(include_input=False)
+            )
+        else:
+            details = str(error)
+
+        return {
+            "prepared_actions": [],
+            "proposal": {
+                **state["proposal"],
+                "outcome": "clarify",
+                "message": (
+                    f"I couldn't prepare this request: {details} "
+                    "Please correct it, or type cancel."
+                ),
+            },
+        }
+
+
+def route_preparation(state: AgentState):
+    if state["cancelled"]:
+        return "finish"
+
+    if state["proposal"]["outcome"] == "clarify":
+        return "clarify"
+
+    return "finish"

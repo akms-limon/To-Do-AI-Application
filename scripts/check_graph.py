@@ -66,6 +66,7 @@ def main():
                     "proposal": None,
                     "reply": "",
                     "cancelled": False,
+                    "prepared_actions": [],
                 },
                 config,
             )
@@ -84,6 +85,10 @@ def main():
 
         if result.get("proposal"):
             print(json.dumps(result["proposal"], indent=2))
+        
+        if result.get("prepared_actions"):
+            print("\nValidated and resolved actions:")
+            print(json.dumps(result["prepared_actions"], indent=2))
 
         print("\nPreview only: no task data was changed.")
 
