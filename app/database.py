@@ -41,3 +41,11 @@ def initialize_database():
                 version INTEGER NOT NULL DEFAULT 1
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS executions (
+                request_id TEXT PRIMARY KEY,
+                actions_json TEXT NOT NULL,
+                result_json TEXT NOT NULL
+            )
+        """)
