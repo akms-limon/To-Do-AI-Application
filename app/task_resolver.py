@@ -3,11 +3,12 @@ import unicodedata
 
 from langgraph.types import interrupt
 
+from app.read_service import matches_filters
 from app.repository import get_task, list_tasks
-from app.search_service import search_tasks, synchronize_index
+from app.search_service import get_collection, synchronize_index
+from app.embeddings import embed_texts
 
 
-# Starting values; further retrieval evaluation is still needed.
 AUTO_MATCH_MAX_DISTANCE = 0.35
 AUTO_MATCH_MIN_GAP = 0.15
 CANDIDATE_MAX_DISTANCE = 0.65
@@ -91,8 +92,8 @@ def choose_candidate(candidates: list[dict]) -> dict:
     by_id = {task["id"]: task for task in candidates}
 
     options = "\n".join(
-        f"{position}. #{task['id']}: "
-        f"{task['title']} ({task['status']})"
+        f"{position}. #{task['id']}: {task['title']} "
+        f"({task['status']}, {task['priority']} priority)"
         for position, task in enumerate(candidates, start=1)
     )
 
@@ -103,7 +104,8 @@ def choose_candidate(candidates: list[dict]) -> dict:
         )
     else:
         base_question = (
-            f"Which task do you mean?\n{options}\n"
+            f"Several tasks could match. Which ONE do you mean?\n"
+            f"{options}\n"
             "Reply with its title, task ID, or a position such as "
             "'the second one'. Type cancel to stop."
         )
@@ -136,9 +138,8 @@ def choose_candidate(candidates: list[dict]) -> dict:
                 return refresh_selected_task(candidates[0])
 
             question = (
-                "'Yes' does not identify one of these tasks. "
-                "Please choose a title, ID, or position.\n"
-                + base_question
+                "'Yes' does not identify one task. "
+                "Choose a title, ID, or position.\n" + base_question
             )
             continue
 
@@ -149,12 +150,10 @@ def choose_candidate(candidates: list[dict]) -> dict:
                 return refresh_selected_task(candidates[position])
 
             question = (
-                "That position is not in the list.\n"
-                + base_question
+                "That position is not in the list.\n" + base_question
             )
             continue
 
-        # Bare numbers always mean task IDs, not list positions.
         id_match = re.fullmatch(
             r"(?:task\s*)?#?([0-9]+)",
             reply,
@@ -167,15 +166,12 @@ def choose_candidate(candidates: list[dict]) -> dict:
                 return refresh_selected_task(by_id[task_id])
 
             question = (
-                "That task ID is not in the list. To select by position, "
-                "say 'the first one', 'the second one', etc.\n"
-                + base_question
+                "That task ID is not in the list.\n" + base_question
             )
             continue
 
         exact_matches = [
-            task
-            for task in candidates
+            task for task in candidates
             if normalize_title(task["title"]) == normalize_title(answer)
         ]
 
@@ -190,10 +186,8 @@ def choose_candidate(candidates: list[dict]) -> dict:
             continue
 
         tokens = title_tokens(answer)
-
         partial_matches = [
-            task
-            for task in candidates
+            task for task in candidates
             if tokens and tokens.issubset(title_tokens(task["title"]))
         ]
 
@@ -206,7 +200,52 @@ def choose_candidate(candidates: list[dict]) -> dict:
         )
 
 
+def semantic_candidates(query: str, eligible: list[dict]):
+    synchronize_index()
+
+    collection = get_collection()
+    count = collection.count()
+
+    if not count:
+        return []
+
+    eligible_by_id = {
+        str(task["id"]): task
+        for task in eligible
+    }
+
+    results = collection.query(
+        query_embeddings=embed_texts([query]),
+        n_results=count,
+        include=["distances", "metadatas"],
+    )
+
+    matches = []
+
+    for task_id, distance, metadata in zip(
+        results["ids"][0],
+        results["distances"][0],
+        results["metadatas"][0],
+    ):
+        task = eligible_by_id.get(task_id)
+
+        if task is None:
+            continue
+
+        if metadata["version"] != task["version"]:
+            continue
+
+        matches.append({
+            "task": task,
+            "distance": float(distance),
+        })
+
+    return matches
+
+
 def resolve_target(action: dict):
+    filters = action.get("filters", {})
+
     if action["task_id"] is not None:
         task = get_task(action["task_id"])
 
@@ -215,33 +254,50 @@ def resolve_target(action: dict):
                 f"Task #{action['task_id']} does not exist."
             )
 
+        if not matches_filters(task, filters):
+            raise ValueError(
+                f"Task #{task['id']} does not match the requested filters."
+            )
+
         return task
 
     query = (action.get("target_query") or "").strip()
 
-    if not query:
-        raise ValueError("Specify a task title or ID.")
-
-    # Prevent unimplemented bulk requests from becoming a single-task match.
     if normalize_title(query) in {
         "all", "all tasks", "all my tasks", "every task",
         "everything", "my tasks", "these tasks", "those tasks",
     }:
         raise ValueError(
             "Bulk changes are not connected yet. "
-            "Please identify one task for now."
+            "Identify one task for now."
         )
 
-    tasks = list_tasks()
+    tasks = [
+        task for task in list_tasks()
+        if matches_filters(task, filters)
+    ]
 
     if not tasks:
-        raise ValueError("There are no tasks to update or delete.")
+        raise ValueError(
+            "No tasks match the requested filters. "
+            "Please change the criteria."
+        )
+
+    if not query:
+        if not filters:
+            raise ValueError(
+                "Specify a title, description, ID, or target filters."
+            )
+
+        if len(tasks) == 1:
+            return refresh_selected_task(tasks[0])
+
+        return choose_candidate(tasks)
 
     normalized_query = normalize_title(query)
 
     exact_matches = [
-        task
-        for task in tasks
+        task for task in tasks
         if normalize_title(task["title"]) == normalized_query
     ]
 
@@ -251,15 +307,14 @@ def resolve_target(action: dict):
     if len(exact_matches) > 1:
         return choose_candidate(exact_matches)
 
-    query_tokens = title_tokens(query)
+    tokens = title_tokens(query)
 
-    if not query_tokens:
-        raise ValueError("Provide a meaningful task title or ID.")
+    if not tokens:
+        raise ValueError("Provide a meaningful title or description.")
 
     title_matches = [
-        task
-        for task in tasks
-        if query_tokens.issubset(title_tokens(task["title"]))
+        task for task in tasks
+        if tokens.issubset(title_tokens(task["title"]))
     ]
 
     if len(title_matches) == 1:
@@ -268,12 +323,11 @@ def resolve_target(action: dict):
     if len(title_matches) > 1:
         return choose_candidate(title_matches)
 
-    synchronize_index()
-    matches = search_tasks(query, limit=20)
+    matches = semantic_candidates(query, tasks)
 
     if not matches:
         raise ValueError(
-            "No current task matched. Provide a clearer title or ID."
+            "No matching task was found. Provide a clearer title or ID."
         )
 
     best = matches[0]
@@ -282,24 +336,23 @@ def resolve_target(action: dict):
     )
 
     strong_match = best["distance"] <= AUTO_MATCH_MAX_DISTANCE
-    clearly_separated = (
+    separated = (
         second_distance is None
         or second_distance - best["distance"] >= AUTO_MATCH_MIN_GAP
     )
 
-    if strong_match and clearly_separated:
+    if strong_match and separated:
         return refresh_selected_task(best["task"])
 
     candidates = [
-        match["task"]
-        for match in matches
+        match["task"] for match in matches
         if match["distance"] <= CANDIDATE_MAX_DISTANCE
     ]
 
     if not candidates:
         raise ValueError(
-            "I couldn't confidently match that description. "
-            "Provide a clearer title or ID."
+            "No sufficiently clear match was found. "
+            "Provide a more specific title or description."
         )
 
     return choose_candidate(candidates)
