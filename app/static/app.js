@@ -19,8 +19,8 @@ const priorityLabels = {
   high: "High",
 };
 
-const THREAD_KEY = "taskflow-v2-thread";
-const PENDING_KEY = "taskflow-v2-pending-message";
+const THREAD_KEY = "taskflow-v3-thread";
+const PENDING_KEY = "taskflow-v3-pending-message";
 
 let threadId = sessionStorage.getItem(THREAD_KEY);
 
@@ -29,7 +29,7 @@ if (!threadId) {
   sessionStorage.setItem(THREAD_KEY, threadId);
 }
 
-const TRANSCRIPT_KEY = "taskflow-v2-transcript";
+const TRANSCRIPT_KEY = "taskflow-v3-transcript";
 let restoredTranscript = [];
 try {
   const stored = JSON.parse(sessionStorage.getItem(TRANSCRIPT_KEY) || "[]");

@@ -10,7 +10,17 @@ from langgraph.types import interrupt
 from app.action_validation import validate_action
 from app.executor import execute_changes
 from app.llm import interpret_message
-from app.repository import get_task
+from app.repository import get_task, list_tasks
+from app.conversation import (
+    GROUP_REPLIES,
+    REFERENCE_WORDS,
+    calendar_context,
+    clarified_values,
+    proposal_for,
+    simple_change,
+    validate_id_sources,
+    refers_to_pending_group,
+)
 from app.task_resolver import (
     CANCEL_REPLIES,
     YES_REPLIES,
@@ -45,6 +55,9 @@ class AgentState(TypedDict, total=False):
     next_node: str
     approved: bool
     force_confirmation: bool
+    pending_targets: list[dict]
+    group_confirmation: bool
+    target_authority: str
 
 
 def initial_state(message, request_id, memory=None):
@@ -67,31 +80,117 @@ def initial_state(message, request_id, memory=None):
         mode="",
         approved=False,
         force_confirmation=False,
+        pending_targets=[],
+        group_confirmation=False,
+        target_authority="",
     )
 
 
 def interpret_node(state):
+    message = state["message"]
     memory = state.get("memory", {})
-    ids = list(
-        dict.fromkeys(memory.get("last_tasks", []) + memory.get("last_results", []))
-    )
-    references = [get_task(i) for i in ids]
+    pending_targets = state.get("pending_targets", [])
+    direct = simple_change(message)
+    data = proposal_for(direct) if direct else None
+    # Completed-task IDs are useful only for references. Never present them as
+    # possible replacements for a newly named target.
+    use_memory = bool(REFERENCE_WORDS.search(message)) and not pending_targets
+    visible_memory = memory if use_memory else {}
+    ids = visible_memory.get(visible_memory.get("focus", ""), [])
+    references = [get_task(i) for i in ids[:100]]
     context = {
-        "references": [
-            {k: t[k] for k in ("id", "title", "status", "priority", "due_date")}
-            for t in references[:100]
-            if t
-        ],
-        "memory": memory,
+        "references": [t for t in references if t],
+        "memory": visible_memory,
+        "pending_targets": pending_targets,
         "pending_proposal": state.get("proposal"),
         "pending_question": state.get("question"),
-        "instruction": "Use pending details for answers/corrections; discard them for replacements.",
+        "calendar": calendar_context(),
+        "instruction": "Resolve names through Python; pending candidates override old memory. Never claim a task does not exist.",
     }
-    proposal = interpret_message(
-        state["message"], history=state.get("history", []), context=context
-    )
-    data = proposal.model_dump(mode="json")
+    if data is None:
+        proposal = interpret_message(
+            message, history=state.get("history", []), context=context
+        )
+        data = proposal.model_dump(mode="json")
     outcome = data["outcome"]
+    # If the only uncertainty is target identity, let the real resolver check it.
+    if (
+        outcome == "clarify"
+        and data.get("clarification_field") == "target"
+        and data.get("actions")
+    ):
+        try:
+            for action in data["actions"]:
+                validate_action(action)
+        except ValueError:
+            pass
+        else:
+            data["outcome"] = outcome = "propose"
+    if outcome == "propose" and not direct:
+        try:
+            if pending_targets:
+                for action in data["actions"]:
+                    if action["operation"] in {
+                        "update_task",
+                        "delete_task",
+                    } and refers_to_pending_group(message):
+                        action.update(
+                            scope="references",
+                            reference="pending_targets",
+                            task_id=None,
+                        )
+                    elif action.get("scope") == "references":
+                        action["reference"] = "pending_targets"
+            # A confirmed explicit title correction must not be replaced by an old ID.
+            authority = state.get("target_authority", "")
+            if authority and len(data["actions"]) == 1:
+                action = data["actions"][0]
+                if (
+                    action["operation"] in {"update_task", "delete_task"}
+                    and action.get("scope", "single") == "single"
+                ):
+                    action.update(task_id=None, target_query=authority, reference=None)
+            validate_id_sources(
+                data["actions"],
+                message,
+                state.get("history", []),
+                visible_memory,
+                pending_targets,
+            )
+        except ValueError as error:
+            data = {
+                "outcome": "clarify",
+                "actions": [],
+                "message": str(error),
+                "clarification_field": "target",
+            }
+            outcome = "clarify"
+    field = data.get("clarification_field")
+    question = data["message"]
+    if outcome == "clarify":
+        # These questions come from the backend, not invented database/calendar facts.
+        questions = {
+            "target": "Which task do you mean? Give its title, description or ID.",
+            "title": "What should the task be called?",
+            "changes": "What would you like to change?",
+            "due_date": "What due date do you mean? Use YYYY-MM-DD, or say 'no due date'.",
+            "priority": "Which priority: low, medium or high?",
+            "status": "Which status: To do, In progress or Done?",
+        }
+        question = questions.get(field, question)
+        if any(
+            term in question.casefold()
+            for term in (
+                "couldn't find",
+                "could not find",
+                "does not exist",
+                "no task",
+                "did you mean task",
+            )
+        ):
+            question = questions["target"]
+        if "weekend" in message.casefold():
+            question = questions["due_date"]
     return {
         "proposal": data,
         "prepared_actions": [],
@@ -99,14 +198,12 @@ def interpret_node(state):
         "candidates": [],
         "approved": False,
         "cancelled": False,
+        "force_confirmation": False,
         "execution_result": None,
         "execution_error": None,
         "index_warning": None,
-        "history": [
-            *state.get("history", []),
-            {"role": "human", "content": state["message"]},
-        ],
-        "question": data["message"],
+        "history": [*state.get("history", []), {"role": "human", "content": message}],
+        "question": question,
         "mode": "clarify",
         "reply": data["message"],
         "next_node": (
@@ -126,28 +223,36 @@ def bind(action, task):
         "target_query": None,
         "expected_version": task["version"],
         "resolved_title": task["title"],
+        "target_snapshot": dict(task),
         "before": {k: task[k] for k in action.get("values", {})},
     }
+
+
+def display_value(value):
+    if value is None:
+        return "none"
+    return {"to_do": "To do", "in_progress": "In progress", "done": "Done"}.get(
+        str(value), str(value)
+    )
 
 
 def describe(action):
     label = f"#{action.get('task_id')} — {action.get('resolved_title', action.get('target_query') or '')}"
     if action["operation"] == "update_task":
         changes = "; ".join(
-            f"{k}: {json.dumps(action.get('before', {}).get(k), ensure_ascii=False)} → {json.dumps(v, ensure_ascii=False)}"
+            f"{k.replace('_', ' ')}: {display_value(action.get('before', {}).get(k))} → {display_value(v)}"
             for k, v in action["values"].items()
         )
         return f"Update {label}: {changes}"
     if action["operation"] == "delete_task":
-        return f"DELETE {label}"
-    return (
-        action["operation"]
-        + ": "
-        + json.dumps(
-            action.get("values") or action.get("filters") or action.get("target_query"),
-            ensure_ascii=False,
-        )
-    )
+        return f"Delete {label}"
+    if action["operation"] == "create_task":
+        values = action["values"]
+        details = f"Create {values['title']} | {display_value(values.get('status', 'to_do'))} | {values.get('priority', 'medium')} priority | Due: {values.get('due_date') or 'none'}"
+        if values.get("description"):
+            details += f" | Description: {values['description']}"
+        return details
+    return "Search tasks" if action["operation"] == "search_tasks" else "List tasks"
 
 
 def plan_text(actions):
@@ -160,7 +265,7 @@ def clarification(error):
         "cursor": 0,
         "candidates": [],
         "approved": False,
-        "force_confirmation": True,
+        "force_confirmation": False,
         "mode": "clarify",
         "next_node": "await_reply",
         "question": f"I couldn't prepare this request: {error} Please correct it, or cancel.",
@@ -180,10 +285,19 @@ def prepare_node(state):
         for index in range(state.get("cursor", 0), len(actions)):
             action = actions[index]
             if action["operation"] in {"update_task", "delete_task"}:
-                targets, candidates = resolve_targets(action, state.get("memory", {}))
+                references = {
+                    **state.get("memory", {}),
+                    "pending_targets": [
+                        t["id"] for t in state.get("pending_targets", [])
+                    ],
+                }
+                if action.get("reference") == "pending_targets":
+                    for task in state.get("pending_targets", []):
+                        refresh_selected_task(task)
+                targets, candidates = resolve_targets(action, references)
                 if candidates:
                     options = "\n".join(
-                        f"{i}. #{t['id']}: {t['title']} ({t['status']}, {t['priority']})"
+                        f"{i}. #{t['id']}: {t['title']} ({display_value(t['status'])}, {t['priority']}) — {t.get('description') or 'No description'}"
                         for i, t in enumerate(candidates, 1)
                     )
                     one = len(candidates) == 1 and len(actions) == 1
@@ -195,16 +309,17 @@ def prepare_node(state):
                         )
                         if one
                         else (
-                            f"Select the target for action {index + 1}: {action['operation']} {json.dumps(action['values'])}\n{options}\nReply with a task ID/title or 'the second one'; cancel or describe a replacement request."
+                            f"Which task should I {'delete' if action['operation'] == 'delete_task' else 'update: ' + '; '.join(k.replace('_', ' ') + ' → ' + display_value(v) for k, v in action['values'].items())}?\n{options}\nChoose a task ID, description or position. You can also say 'both' or 'all of these', cancel, or give a replacement request."
                         )
                     )
                     return {
                         "prepared_actions": prepared,
                         "cursor": index,
                         "candidates": candidates,
+                        "pending_targets": candidates,
                         "mode": "select_execute" if one else "select",
                         "question": question,
-                        "force_confirmation": True,
+                        "force_confirmation": False,
                         "next_node": "await_reply",
                     }
                 if not targets:
@@ -252,7 +367,7 @@ def prepare_node(state):
             }
         mutations = [a for a in prepared if a["operation"] in MUTATIONS]
         needs = bool(mutations) and (
-            state.get("force_confirmation")
+            state.get("group_confirmation")
             or len(mutations) > 1
             or any(
                 a["operation"] == "delete_task" or a.get("scope", "single") != "single"
@@ -265,6 +380,9 @@ def prepare_node(state):
                 "cursor": len(actions),
                 "mode": "confirm",
                 "candidates": [],
+                "pending_targets": [
+                    a["target_snapshot"] for a in prepared if a.get("task_id")
+                ],
                 "question": f"Confirm this plan ({len(mutations)} change(s)); nothing has executed:\n{plan_text(prepared)}\nReply yes to apply exactly this plan, no to cancel, or describe a correction.",
                 "next_node": "await_reply",
             }
@@ -280,6 +398,24 @@ def await_reply_node(state):
     if isinstance(delivery, dict):
         update["delivery_id"] = delivery["message_id"]
     return update
+
+
+def replan(state, actions, **extra):
+    return {
+        "proposal": {
+            "outcome": "propose",
+            "actions": actions,
+            "message": "Preparing the requested change.",
+        },
+        "prepared_actions": [],
+        "cursor": 0,
+        "candidates": [],
+        "approved": False,
+        "force_confirmation": False,
+        "group_confirmation": False,
+        "next_node": "prepare",
+        **extra,
+    }
 
 
 def handle_reply(state, answer):
@@ -298,9 +434,24 @@ def handle_reply(state, answer):
         }
     if state["mode"] == "confirm" and reply in YES_REPLIES:
         return {"approved": True, "next_node": "execute"}
+    # Clear named instructions are replacements, not candidate answers.
+    direct = simple_change(answer)
+    if direct:
+        return replan(
+            state, [direct], history=[], pending_targets=[], target_authority=""
+        )
     if state["mode"] in {"select", "select_execute"}:
+        candidates = state["candidates"]
         try:
-            selected = select_from_reply(answer, state["candidates"])
+            if reply in GROUP_REPLIES:
+                if reply.startswith("both") and len(candidates) != 2:
+                    raise ValueError(
+                        "Which two tasks? There are not exactly two offered candidates."
+                    )
+                selected = candidates
+            else:
+                item = select_from_reply(answer, candidates)
+                selected = [item] if item else []
         except ValueError as error:
             return {
                 "question": str(error) + "\n" + state["question"],
@@ -308,11 +459,12 @@ def handle_reply(state, answer):
             }
         try:
             if selected:
-                task = refresh_selected_task(selected)
                 action = validate_action(state["proposal"]["actions"][state["cursor"]])
-                prepared = [*state["prepared_actions"], bind(action, task)]
-                # The one-candidate question already showed the exact operation.
-                if state["mode"] == "select_execute":
+                prepared = [
+                    *state["prepared_actions"],
+                    *[bind(action, refresh_selected_task(t)) for t in selected],
+                ]
+                if state["mode"] == "select_execute" and len(selected) == 1:
                     return {
                         "prepared_actions": prepared,
                         "approved": True,
@@ -322,18 +474,106 @@ def handle_reply(state, answer):
                     "prepared_actions": prepared,
                     "cursor": state["cursor"] + 1,
                     "candidates": [],
+                    "group_confirmation": len(selected) > 1,
                     "next_node": "prepare",
                 }
         except ValueError as error:
             return clarification(str(error))
-    # Anything other than exact approval is interpreted as an answer/correction/replacement.
+    if state["mode"] in {"select", "select_execute"}:
+        actions = state["proposal"]["actions"]
+        index = state["cursor"]
+        corrected = clarified_values(answer, actions[index])
+        if corrected:
+            actions = [*actions[:index], corrected, *actions[index + 1 :]]
+            return {
+                "proposal": {**state["proposal"], "actions": actions},
+                "approved": False,
+                "candidates": [],
+                "next_node": "prepare",
+            }
+    if state["mode"] == "confirm" and state.get("pending_targets"):
+        # Ordinals refer to THIS displayed plan, never an earlier candidate list.
+        try:
+            selected = select_from_reply(answer, state["pending_targets"])
+            if selected:
+                refresh_selected_task(selected)
+                prepared = [
+                    a
+                    for a in state["prepared_actions"]
+                    if a.get("task_id") == selected["id"]
+                ]
+                return {
+                    "prepared_actions": prepared,
+                    "cursor": len(state["proposal"]["actions"]),
+                    "group_confirmation": False,
+                    "approved": False,
+                    "proposal": {
+                        "outcome": "propose",
+                        "actions": [
+                            {
+                                k: v
+                                for k, v in a.items()
+                                if k
+                                in {
+                                    "operation",
+                                    "task_id",
+                                    "target_query",
+                                    "scope",
+                                    "reference",
+                                    "values",
+                                    "filters",
+                                }
+                            }
+                            for a in prepared
+                        ],
+                        "message": "Selected one change.",
+                    },
+                    "next_node": "prepare",
+                }
+        except ValueError as error:
+            return {
+                "question": str(error) + "\n" + state["question"],
+                "next_node": "await_reply",
+            }
+    pending = (state.get("proposal") or {}).get("actions", [])
+    if state["mode"] == "clarify" and len(pending) == 1:
+        corrected = clarified_values(answer, pending[0])
+        if corrected:
+            return replan(state, [corrected])
+        # A title or ID answer completes a pending target without losing its changes.
+        task = next(
+            (t for t in list_tasks() if normalize_reply(t["title"]) == reply), None
+        )
+        if task and pending[0]["operation"] in {"update_task", "delete_task"}:
+            action = {
+                **pending[0],
+                "task_id": None,
+                "target_query": answer,
+                "scope": "single",
+                "reference": None,
+            }
+            return replan(state, [action], target_authority=answer)
+    if reply in YES_REPLIES or reply in GROUP_REPLIES:
+        # A model clarification is not an execution preview. A bare yes cannot
+        # turn a hallucinated suggestion into permission to change an old task.
+        return {
+            "question": "No executable change is awaiting approval. Give the task title and requested change, or cancel.",
+            "next_node": "await_reply",
+        }
+    # Preserve the exact displayed set for interpreted corrections. Do not mix it
+    # with completed-task memory; the model can reference pending_targets only.
+    title_match = next(
+        (t for t in list_tasks() if normalize_reply(t["title"]) == reply), None
+    )
     return {
         "message": answer,
         "approved": False,
         "prepared_actions": [],
         "candidates": [],
         "cursor": 0,
-        "force_confirmation": True,
+        "force_confirmation": False,
+        "group_confirmation": False,
+        "target_authority": answer if title_match else "",
         "history": [
             *state.get("history", []),
             {"role": "assistant", "content": state["question"]},
@@ -410,6 +650,9 @@ def finish_node(state):
         "reply": reply,
         "memory": memory,
         "history": [],
+        "pending_targets": [],
+        "group_confirmation": False,
+        "target_authority": "",
         "proposal": None,
         "prepared_actions": [],
         "candidates": [],

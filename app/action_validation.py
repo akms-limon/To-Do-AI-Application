@@ -36,7 +36,7 @@ def validate_action(raw: dict) -> dict:
     if action.scope == "matching" and not (filters or action.target_query):
         raise ValueError("Matching scope requires filters or a description.")
     if action.scope == "references" and not action.reference:
-        raise ValueError("Identify last_tasks or last_results for contextual targets.")
+        raise ValueError("Identify pending_targets, last_tasks or last_results for contextual targets.")
     if action.reference and action.scope != "references":
         raise ValueError("Reference requires references scope.")
 

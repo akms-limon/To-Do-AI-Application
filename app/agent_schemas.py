@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ActionProposal(BaseModel):
@@ -26,7 +26,7 @@ class ActionProposal(BaseModel):
     )
 
     scope: Literal["single", "all", "matching", "references"] = "single"
-    reference: Literal["last_tasks", "last_results"] | None = None
+    reference: Literal["last_tasks", "last_results", "pending_targets"] | None = None
 
     values: dict[str, str | None] = Field(
         default_factory=dict,
@@ -44,6 +44,14 @@ class ActionProposal(BaseModel):
             "Status can also be unfinished."
         ),
     )
+
+    @field_validator("values", "filters", mode="before")
+    @classmethod
+    def normalize_empty_containers(cls, value):
+        # Some model responses use null instead of an empty object. Normalize
+        # only the container; nested nulls (e.g. clearing due_date) stay intact.
+        # Other types and all field names still undergo normal validation.
+        return {} if value is None else value
 
     @model_validator(mode="after")
     def check_field_names(self):
@@ -63,6 +71,11 @@ class AgentProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     outcome: Literal["propose", "clarify", "unsupported"]
+
+    clarification_field: (
+        Literal["target", "title", "changes", "due_date", "priority", "status", "other"]
+        | None
+    ) = None
 
     actions: list[ActionProposal] = Field(
         default_factory=list,

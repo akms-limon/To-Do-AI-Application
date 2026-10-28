@@ -15,8 +15,8 @@ from app.graph import build_graph, initial_state
 logger = logging.getLogger(__name__)
 DATA_DIRECTORY = Path(__file__).resolve().parents[1] / "data"
 # Versioned graph store: never resume old graph topology with new nodes.
-CHECKPOINT_PATH = DATA_DIRECTORY / "checkpoints_v2.db"
-RECEIPT_PATH = DATA_DIRECTORY / "chat_receipts_v2.db"
+CHECKPOINT_PATH = DATA_DIRECTORY / "checkpoints_v3.db"
+RECEIPT_PATH = DATA_DIRECTORY / "chat_receipts_v3.db"
 CHAT_LOCK = Lock()
 
 

@@ -81,6 +81,12 @@ class Workflows(unittest.TestCase):
         self.tmp.cleanup()
 
     def start(self, value, message="instruction"):
+        if message == "instruction":
+            ids = [a.task_id for a in value.actions if a.task_id is not None]
+            if ids:
+                message = "Apply requested changes to " + ", ".join(
+                    f"task #{i}" for i in ids
+                )
         self.queue.append(value)
         memory = self.graph.get_state(self.config).values.get("memory", {})
         return self.graph.invoke(
@@ -133,13 +139,8 @@ class Workflows(unittest.TestCase):
 
     def test_replacement_does_not_execute_old_plan(self):
         self.start(proposal(action("delete_task", scope="all")))
-        self.queue.append(
-            proposal(action(task_id=self.first["id"], values={"priority": "medium"}))
-        )
-        result = self.reply("Instead make football medium")
-        self.assertIn("__interrupt__", result)
-        self.assertEqual(len(list_tasks()), 2)
-        self.reply("yes")
+        result = self.reply("Change the priority of Play football to medium")
+        self.assertNotIn("__interrupt__", result)
         self.assertEqual(len(list_tasks()), 2)
         self.assertEqual(get_task(self.first["id"])["priority"], "medium")
         self.assertEqual(get_task(self.second["id"])["priority"], "medium")
@@ -277,7 +278,7 @@ class Workflows(unittest.TestCase):
 
     def test_chat_retry_after_provider_failure(self):
         payload = chat_service.ChatRequest(
-            thread_id=uuid4(), message_id=uuid4(), message="make football high"
+            thread_id=uuid4(), message_id=uuid4(), message="make task #1 high"
         )
         self.queue.append(ConnectionError("offline"))
         with self.assertLogs("app.chat_service", level="ERROR"):
@@ -308,7 +309,15 @@ class Workflows(unittest.TestCase):
         self.assertEqual(first, chat_service.handle_chat(yes))
         self.queue.append(proposal(action("list_tasks")))
         chat_service.handle_chat(payload("show tasks"))
-        self.assertEqual(len(self.contexts[-1][2]["memory"]["last_tasks"]), 2)
+        # Unrelated new instructions do not expose stale mutation targets to the model.
+        self.assertEqual(self.contexts[-1][2]["memory"], {})
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        with SqliteSaver.from_conn_string(str(chat_service.CHECKPOINT_PATH)) as saver:
+            saved = graph.build_graph(saver).get_state(
+                {"configurable": {"thread_id": str(thread)}}
+            )
+            self.assertEqual(len(saved.values["memory"]["last_tasks"]), 2)
 
     def test_empty_search_replaces_previous_references(self):
         self.start(proposal(action("list_tasks")))
@@ -351,7 +360,7 @@ class Workflows(unittest.TestCase):
 
     def test_retry_after_commit_before_receipt_saved(self):
         payload = chat_service.ChatRequest(
-            thread_id=uuid4(), message_id=uuid4(), message="football high"
+            thread_id=uuid4(), message_id=uuid4(), message="task #1 high"
         )
         self.queue.append(
             proposal(action(task_id=self.first["id"], values={"priority": "high"}))
@@ -463,6 +472,399 @@ class Workflows(unittest.TestCase):
             )
         )
         self.assertEqual(len(list_tasks()), 3)
+
+    def direct(self, text, memory=None):
+        return self.graph.invoke(
+            graph.initial_state(text, str(uuid4()), memory), self.config
+        )
+
+    def reviews(self):
+        front = create_task(
+            TaskCreate(
+                title="QA Review",
+                description="Review frontend accessibility",
+                priority="low",
+            )
+        )
+        back = create_task(
+            TaskCreate(
+                title="QA Review",
+                description="Review backend security",
+                priority="high",
+            )
+        )
+        return front, back
+
+    def test_exact_duplicate_title_resolves_before_model_questions(self):
+        self.reviews()
+        result = self.direct("Change QA Review to medium priority.")
+        self.assertIn("__interrupt__", result)
+        self.assertEqual(len(result["candidates"]), 2)
+        self.assertIn("Review frontend accessibility", result["question"])
+        self.assertIn("Review backend security", result["question"])
+        self.assertEqual(self.contexts, [])
+
+    def test_both_uses_only_offered_ids_not_previous_memory(self):
+        front, back = self.reviews()
+        self.direct(
+            "Change QA Review to medium priority.",
+            {"last_tasks": [self.first["id"]], "focus": "last_tasks"},
+        )
+        result = self.reply("both of them")
+        self.assertEqual(
+            {a["task_id"] for a in result["prepared_actions"]},
+            {front["id"], back["id"]},
+        )
+        self.assertIn("__interrupt__", result)
+        self.reply("yes")
+        self.assertEqual(get_task(self.first["id"])["priority"], "low")
+        self.assertEqual(get_task(front["id"])["priority"], "medium")
+        self.assertEqual(get_task(back["id"])["priority"], "medium")
+        self.assertEqual(self.contexts, [])
+
+    def test_both_with_three_candidates_asks_which_two(self):
+        self.reviews()
+        create_task(TaskCreate(title="QA Review", priority="high"))
+        self.direct("Change QA Review to medium priority.")
+        result = self.reply("both")
+        self.assertIn("Which two", result["question"])
+        self.assertEqual(result["prepared_actions"], [])
+
+    def test_description_selection_executes_update_without_second_confirmation(self):
+        front, back = self.reviews()
+        self.direct("Change QA Review to medium priority.")
+        result = self.reply("The one about backend security.")
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(get_task(back["id"])["priority"], "medium")
+        self.assertEqual(get_task(front["id"])["priority"], "low")
+        self.assertEqual(self.contexts, [])
+
+    def test_first_uses_current_preview_order(self):
+        front, back = self.reviews()
+        self.direct("Change QA Review to medium priority.")
+        preview = self.reply("both")
+        first_id = preview["prepared_actions"][0]["task_id"]
+        other_id = next(i for i in (front["id"], back["id"]) if i != first_id)
+        previous = get_task(other_id)["priority"]
+        result = self.reply("first one")
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(get_task(first_id)["priority"], "medium")
+        self.assertEqual(get_task(other_id)["priority"], previous)
+
+    def test_misspelled_named_task_ignores_old_review_memory(self):
+        review = create_task(TaskCreate(title="QA Review", priority="low"))
+        football = create_task(TaskCreate(title="QA Football practice", priority="low"))
+        result = self.direct(
+            "Change the priority of QA Footbal practce to high.",
+            {"last_tasks": [review["id"]], "focus": "last_tasks"},
+        )
+        self.assertEqual([t["id"] for t in result["candidates"]], [football["id"]])
+        result = self.reply("yes")
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(get_task(review["id"])["priority"], "low")
+        self.assertEqual(get_task(football["id"])["priority"], "high")
+        self.assertEqual(self.contexts, [])
+
+    def test_named_replacement_discards_pending_review(self):
+        front, back = self.reviews()
+        self.direct("Change QA Review to medium priority.")
+        result = self.reply("Change the priority of Play football to high.")
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(get_task(self.first["id"])["priority"], "high")
+        self.assertEqual(get_task(front["id"])["priority"], "low")
+        self.assertEqual(get_task(back["id"])["priority"], "high")
+
+    def test_model_cannot_choose_unrelated_memory_id(self):
+        memory = {"last_tasks": [self.second["id"]], "focus": "last_tasks"}
+        self.queue.append(
+            proposal(action(task_id=self.second["id"], values={"priority": "high"}))
+        )
+        result = self.direct("football er priority high koro", memory)
+        self.assertIn("__interrupt__", result)
+        self.assertEqual(get_task(self.second["id"])["priority"], "medium")
+        result = self.reply("yes")
+        self.assertIn("No executable change", result["question"])
+        self.assertEqual(get_task(self.second["id"])["priority"], "medium")
+        self.assertEqual(len(self.contexts), 1)
+
+    def test_exact_title_reply_preserves_requested_change(self):
+        partial = AgentProposal(
+            outcome="clarify",
+            clarification_field="target",
+            actions=[action(values={"priority": "high"})],
+            message="Which task?",
+        )
+        self.start(partial)
+        result = self.reply("Play football")
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(get_task(self.first["id"])["priority"], "high")
+        self.assertEqual(len(self.contexts), 1)
+
+    def test_title_in_target_clarification_resolved_by_backend(self):
+        partial = AgentProposal(
+            outcome="clarify",
+            clarification_field="target",
+            actions=[action(target_query="Play football", values={"priority": "high"})],
+            message="Does this task exist?",
+        )
+        result = self.start(partial)
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(get_task(self.first["id"])["priority"], "high")
+
+    def test_no_due_date_after_clarification_creates_without_confirmation(self):
+        partial = AgentProposal(
+            outcome="clarify",
+            clarification_field="due_date",
+            actions=[action("create_task", values={"title": "Weekend football"})],
+            message="Saturday (2026-10-29) or Sunday (2026-10-30)?",
+        )
+        result = self.start(partial, "Create a task to play football on weekend")
+        self.assertNotIn("Saturday", result["question"])
+        result = self.reply("No deu date")
+        self.assertNotIn("__interrupt__", result)
+        new = result["execution_result"]["results"][0]["task"]
+        self.assertEqual(new["title"], "Weekend football")
+        self.assertIsNone(new["due_date"])
+        self.assertEqual(len(self.contexts), 1)
+
+    def test_missing_change_reply_does_not_repeat_target_question(self):
+        partial = AgentProposal(
+            outcome="clarify",
+            clarification_field="changes",
+            actions=[action(task_id=self.first["id"])],
+            message="What change?",
+        )
+        self.start(partial)
+        result = self.reply("Make it high priority")
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(get_task(self.first["id"])["priority"], "high")
+
+    def test_candidate_deletion_still_requires_confirmation(self):
+        front, back = self.reviews()
+        self.start(proposal(action("delete_task", target_query="QA Review")))
+        result = self.reply("The one about backend security")
+        self.assertIn("__interrupt__", result)
+        self.assertIsNotNone(get_task(back["id"]))
+        self.reply("yes")
+        self.assertIsNone(get_task(back["id"]))
+        self.assertIsNotNone(get_task(front["id"]))
+
+    def test_interpreted_candidate_reference_overrides_old_results(self):
+        front, back = self.reviews()
+        self.direct(
+            "Change QA Review to medium priority.",
+            {"last_results": [self.first["id"]], "focus": "last_results"},
+        )
+        self.queue.append(
+            proposal(
+                action(
+                    scope="references",
+                    reference="last_results",
+                    values={"priority": "high"},
+                )
+            )
+        )
+        result = self.reply("Make those high instead")
+        self.assertEqual(
+            {a["task_id"] for a in result["prepared_actions"]}, {front["id"]}
+        )
+        self.assertIn("__interrupt__", result)
+        self.reply("yes")
+        self.assertEqual(get_task(self.first["id"])["priority"], "low")
+        self.assertEqual(get_task(front["id"])["priority"], "high")
+        self.assertEqual(get_task(back["id"])["priority"], "high")
+
+    def test_stale_candidate_selection_never_mutates(self):
+        self.reviews()
+        result = self.direct("Change QA Review to medium priority.")
+        selected = result["candidates"][0]
+        update_task(selected["id"], TaskUpdate(description="Changed externally"))
+        result = self.reply("first one")
+        self.assertIn("__interrupt__", result)
+        self.assertIn("changed or was deleted", result["question"])
+        self.assertEqual(get_task(selected["id"])["priority"], selected["priority"])
+
+    def test_calendar_weekday_pairs_are_python_computed(self):
+        from datetime import date
+        from app.conversation import calendar_context
+
+        days = calendar_context()
+        self.assertEqual(len(days), 15)
+        for entry in days:
+            self.assertEqual(
+                date.fromisoformat(entry["date"]).strftime("%A"), entry["weekday"]
+            )
+
+    def test_create_preview_is_human_readable(self):
+        result = self.start(
+            proposal(
+                action("create_task", values={"title": "One"}),
+                action("create_task", values={"title": "Two"}),
+            )
+        )
+        self.assertIn("Create One", result["question"])
+        self.assertNotIn("create_task", result["question"])
+        self.assertNotIn("{", result["question"])
+
+    def test_compound_command_not_partially_handled_by_shortcut(self):
+        from app.conversation import simple_change
+
+        self.assertIsNone(
+            simple_change("Move Demo to In progress and mark football Done")
+        )
+        self.assertIsNone(simple_change("Change all tasks to high priority"))
+        self.assertIsNone(
+            simple_change("Change the task with medium priority to high priority")
+        )
+
+    def test_longer_both_correction_cannot_expand_to_all_database(self):
+        front, back = self.reviews()
+        self.direct("Change QA Review to medium priority.")
+        self.queue.append(proposal(action(scope="all", values={"priority": "high"})))
+        result = self.reply("Please make both of them high instead")
+        self.assertIn("__interrupt__", result)
+        self.assertEqual(
+            {a["task_id"] for a in result["prepared_actions"]}, {front["id"]}
+        )
+        self.reply("yes")
+        self.assertEqual(get_task(self.first["id"])["priority"], "low")
+        self.assertEqual(get_task(self.second["id"])["priority"], "medium")
+
+    def test_id_from_old_pending_instruction_cannot_authorize_new_named_request(self):
+        from app.conversation import validate_id_sources
+
+        with self.assertRaises(ValueError):
+            validate_id_sources(
+                [action(task_id=self.second["id"], values={"priority": "high"})],
+                "Please update football priority",
+                [{"role": "human", "content": f"Delete task #{self.second['id']}"}],
+                {},
+                [],
+            )
+
+    def test_priority_correction_keeps_duplicate_selection_open(self):
+        front, back = self.reviews()
+        self.direct("Change QA Review to medium priority.")
+        result = self.reply("No, high instead")
+        self.assertIn("__interrupt__", result)
+        self.assertEqual(get_task(front["id"])["priority"], "low")
+        result = self.reply("The one about frontend accessibility")
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(get_task(front["id"])["priority"], "high")
+        self.assertEqual(self.contexts, [])
+
+    def test_confirm_keeps_original_snapshot_when_task_changes(self):
+        front, back = self.reviews()
+        self.direct("Change QA Review to medium priority.")
+        result = self.reply("both")
+        frozen = result["pending_targets"][0]
+        update_task(frozen["id"], TaskUpdate(description="Modified after preview"))
+        result = self.reply("yes")
+        self.assertIn("changed after selection", result["execution_error"])
+        self.assertEqual(get_task(front["id"])["priority"], "low")
+        self.assertEqual(get_task(back["id"])["priority"], "high")
+
+    def test_null_delete_payload_reaches_four_candidates_without_writes(self):
+        from langchain_core.output_parsers import PydanticOutputParser
+
+        created = [create_task(TaskCreate(title="Python practice")) for _ in range(4)]
+        raw = {
+            "outcome": "propose",
+            "message": "Proposed deletion.",
+            "actions": [
+                {
+                    "operation": "delete_task",
+                    "task_id": None,
+                    "target_query": "python prctice",
+                    "scope": "single",
+                    "reference": None,
+                    "values": None,
+                    "filters": None,
+                }
+            ],
+        }
+        parsed = PydanticOutputParser(pydantic_object=AgentProposal).parse(
+            json.dumps(raw)
+        )
+        result = self.start(parsed, "Delete python prctice")
+        self.assertIn("__interrupt__", result)
+        self.assertEqual(
+            {t["id"] for t in result["candidates"]}, {t["id"] for t in created}
+        )
+        self.assertTrue(all(get_task(t["id"]) for t in created))
+        result = self.reply("yes")
+        self.assertIn("__interrupt__", result)
+        self.assertTrue(all(get_task(t["id"]) for t in created))
+        self.reply("cancel")
+        self.assertTrue(all(get_task(t["id"]) for t in created))
+
+
+class EmptyContainerNormalization(unittest.TestCase):
+    def test_null_containers_normalize(self):
+        from app.agent_schemas import ActionProposal
+
+        item = ActionProposal(
+            operation="delete_task",
+            target_query="Python practice",
+            values=None,
+            filters=None,
+        )
+        self.assertEqual(item.values, {})
+        self.assertEqual(item.filters, {})
+
+    def test_nested_nulls_preserved(self):
+        result = validate_action(
+            action(
+                task_id=1, values={"due_date": None, "description": None}, filters=None
+            )
+        )
+        self.assertEqual(result["values"], {"due_date": None, "description": None})
+
+    def test_invalid_container_types_still_rejected(self):
+        from app.agent_schemas import ActionProposal
+
+        for field in ["values", "filters"]:
+            for value in ["", [], 0, False, "null"]:
+                with self.subTest(field=field, value=value), self.assertRaises(
+                    ValueError
+                ):
+                    ActionProposal.model_validate(
+                        {"operation": "delete_task", field: value}
+                    )
+
+    def test_null_update_cannot_become_valid_empty_write(self):
+        with self.assertRaises(ValueError):
+            validate_action(action(task_id=1, values=None, filters=None))
+
+    def test_null_create_still_requires_title(self):
+        with self.assertRaises(ValueError):
+            validate_action(action("create_task", values=None, filters=None))
+
+    def test_unknown_fields_not_discarded(self):
+        with self.assertRaises(ValueError):
+            validate_action(
+                action(
+                    "delete_task", task_id=1, values={"unexpected": None}, filters=None
+                )
+            )
+        with self.assertRaises(ValueError):
+            validate_action(
+                action(
+                    "delete_task",
+                    task_id=1,
+                    values=None,
+                    filters={"location": "Gulshan"},
+                )
+            )
+
+    def test_valid_filters_are_preserved(self):
+        result = validate_action(
+            action(
+                "delete_task", scope="matching", values=None, filters={"status": "done"}
+            )
+        )
+        self.assertEqual(result["filters"], {"status": "done"})
+        self.assertEqual(result["scope"], "matching")
 
 
 class SearchNormalization(unittest.TestCase):

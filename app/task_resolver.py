@@ -69,6 +69,36 @@ def select_from_reply(answer, candidates):
         return matches[0]
     if len(matches) > 1:
         raise ValueError("Those tasks share a title; choose an ID.")
+    # Distinguish duplicate titles using actual descriptions (no LLM guess).
+    detail = re.sub(
+        r"^(?:the )?(?:one|task) (?:about|with|whose description is|with description)\s+",
+        "",
+        reply,
+    )
+    tokens = set(normalize_title(detail).split()) - {"the", "a", "an", "description"}
+    if tokens and (
+        detail != reply
+        or not re.search(
+            r"\b(change|update|delete|make|set|move|create|mark|instead)\b", reply
+        )
+    ):
+        matches = [
+            t
+            for t in candidates
+            if tokens.issubset(
+                set(
+                    normalize_title(
+                        t["title"] + " " + (t.get("description") or "")
+                    ).split()
+                )
+            )
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(
+                "That description matches multiple offered tasks. Choose an ID or position."
+            )
     return None  # Full natural-language replies return to the interpreter.
 
 
