@@ -32,8 +32,8 @@ New tasks default to `to_do` status and `medium` priority.
 |---|---|
 | Python and FastAPI | Backend API and request validation with a small setup |
 | HTML, CSS and JavaScript | Responsive single-page interface without a frontend framework |
-| Groq | Hosted language-model inference without running a generative model locally |
-| LangChain Groq integration | Connects the application to Groq and parses structured responses |
+| Ai API | Hosted language-model inference without running a generative model locally |
+| LangChain Api integration | Connects the application to Api and parses structured responses |
 | LangGraph | Manages interpretation, clarification, confirmation and execution |
 | Pydantic | Validates structured actions and task fields |
 | SQLite | Persistent task storage without a separate database server |
@@ -42,15 +42,15 @@ New tasks default to `to_do` status and `medium` priority.
 
 The embedding model is `all-MiniLM-L6-v2`, using Chroma's ONNX implementation. It generates 384-dimensional vectors on CPU.
 
-MiniLM is used for embeddings, not conversational text generation. Groq handles language interpretation.
+MiniLM is used for embeddings, not conversational text generation. Ai API handles language interpretation.
 
 ## Requirements
 
 - Python 3.11
 - uv
 - Git
-- Internet access for Groq requests and the initial embedding-model download
-- A Groq API key
+- Internet access for LLM API requests and the initial embedding-model download
+- An API key for the selected LLM provider
 
 ## Installation
 
@@ -68,7 +68,7 @@ uv python install 3.11
 uv sync --locked
 ```
 
-### Configure the LLM provider
+### 2. Configure the LLM provider
 
 Copy `.env.example` to `.env` and configure your provider.
 
@@ -133,7 +133,7 @@ Bulk operations and deletions require confirmation. Review the affected task IDs
 ## How a request works
 
 1. The browser sends the message with a conversation ID and a unique message ID.
-2. Recognized simple priority/status instructions can be interpreted locally. Other instructions are sent to Groq with relevant conversation context.
+2. Recognized simple priority/status instructions can be interpreted locally. Other instructions are sent to Ai api with relevant conversation context.
 3. The interpreter produces a structured proposal containing operations, targets, filters and requested changes.
 4. Pydantic and Python validation check supported fields, values, dates and operation scope.
 5. The resolver identifies tasks using IDs, title matching, filters or semantic candidates.
@@ -195,28 +195,6 @@ Saved execution receipts prevent a retried request from duplicating an already c
 
 If task changes commit but search synchronization fails, the application reports the saved changes separately from the search-index warning.
 
-## Testing
-
-### Offline workflow checks
-
-```bash
-uv run python -m scripts.check_workflows
-```
-
-These checks use temporary databases and mocked model/vector responses. They do not modify normal application data or consume Groq API quota.
-
-Coverage includes:
-
-- Ambiguous task selection and confirmation.
-- Contextual references and replacement requests.
-- Bulk updates and deletions.
-- Cancellation and stale task versions.
-- Atomic execution and duplicate-request protection.
-- Search-operation normalization.
-- Empty-container normalization in AI responses.
-
-Offline tests verify application logic. They do not prove that the live model understands every possible instruction.
-
 ## Project structure
 
 ```text
@@ -225,7 +203,7 @@ app/
 ├── agent_schemas.py        # Structured AI proposals
 ├── schemas.py              # Task input validation
 ├── action_validation.py    # Operation validation and normalization
-├── llm.py                  # Groq integration and interpretation prompt
+├── llm.py                  # Ai integration and interpretation prompt
 ├── conversation.py         # Local shortcuts and reference checks
 ├── graph.py                # Conversation workflow
 ├── task_resolver.py        # Task matching and candidate selection

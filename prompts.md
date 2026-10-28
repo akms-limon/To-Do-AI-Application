@@ -1,4 +1,4 @@
-# Four meaningful prompts given bellow where I explained failures encountered, and how I corrected them.
+# Development Prompts, Failures and Corrections
 
 ## Prompt-1: Initial prompt
 ### prompt:
@@ -31,7 +31,7 @@ required its numeric ID. The resolver handled exact titles directly but
 asked for confirmation for every semantic match, making natural-language
 updates unnecessarily repetitive.
 
-### Correction planned:
+### Correction Implemented:
 I will adjust target resolution so a unique, sufficiently clear title or semantic
 match can be selected automatically. Ambiguous or weak matches will still require
 clarification. I wont treat the highest-ranked search result as automatically
@@ -55,5 +55,5 @@ kono task change ba delete korbe na.
 ### Failure encountered:
 When the assistant asked me to confirm a task, it didn’t accept “yes.” Instead, it repeatedly asked for the task’s title or ID.
 
-### Planned correction:
+### Correction Implemented:
 Context-aware confirmation, filter-based target resolution, and ambiguous operation confirmation flow.
