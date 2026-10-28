@@ -7,20 +7,43 @@ from app.repository import get_task, list_tasks
 from app.search_service import search_tasks, synchronize_index
 
 
-# Conservative starting values, not calibrated guarantees.
-# Lower cosine distance means greater similarity.
+# Starting values; further retrieval evaluation is still needed.
 AUTO_MATCH_MAX_DISTANCE = 0.35
 AUTO_MATCH_MIN_GAP = 0.15
 CANDIDATE_MAX_DISTANCE = 0.65
 
 GENERIC_WORDS = {
-    "task",
-    "tasks",
-    "the",
-    "a",
-    "an",
-    "my",
-    "please",
+    "task", "tasks", "the", "a", "an", "my", "please",
+}
+
+YES_REPLIES = {
+    "yes", "yes please", "yes that one", "yes this one",
+    "correct", "that's correct", "that is correct",
+    "confirm", "confirmed", "haan", "ha", "hya",
+    "হ্যাঁ", "হ্যা", "জি",
+}
+
+CANCEL_REPLIES = {
+    "no", "nope", "cancel", "stop", "none",
+    "none of these", "na", "না",
+}
+
+POSITIONS = {
+    "first": 0,
+    "first one": 0,
+    "the first one": 0,
+    "second": 1,
+    "second one": 1,
+    "the second one": 1,
+    "third": 2,
+    "third one": 2,
+    "the third one": 2,
+    "fourth": 3,
+    "fourth one": 3,
+    "the fourth one": 3,
+    "fifth": 4,
+    "fifth one": 4,
+    "the fifth one": 4,
 }
 
 
@@ -31,6 +54,12 @@ class RequestCancelled(Exception):
 def normalize_title(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).casefold()
     return " ".join(re.findall(r"\w+", text))
+
+
+def normalize_reply(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text).casefold()
+    text = text.replace("’", "'")
+    return " ".join(text.strip().rstrip(".!?।").split())
 
 
 def title_tokens(text: str) -> set[str]:
@@ -52,34 +81,32 @@ def refresh_selected_task(task: dict) -> dict:
     if current["version"] != task["version"]:
         raise ValueError(
             f"Task #{task['id']} changed during selection. "
-            "Please restate the request so its current details can be checked."
+            "Please restate the request."
         )
 
     return current
 
 
 def choose_candidate(candidates: list[dict]) -> dict:
-    by_id = {
-        task["id"]: task
-        for task in candidates
-    }
+    by_id = {task["id"]: task for task in candidates}
 
     options = "\n".join(
-        f"#{task['id']}: {task['title']} ({task['status']})"
-        for task in candidates
+        f"{position}. #{task['id']}: "
+        f"{task['title']} ({task['status']})"
+        for position, task in enumerate(candidates, start=1)
     )
 
-    introduction = (
-        "Which task do you mean?"
-        if len(candidates) > 1
-        else "Is this the task you mean?"
-    )
-
-    base_question = (
-        f"{introduction}\n"
-        f"{options}\n"
-        "Reply with its title or ID, or type cancel."
-    )
+    if len(candidates) == 1:
+        base_question = (
+            f"Is this the task you mean?\n{options}\n"
+            "Reply yes to select it, or no to cancel."
+        )
+    else:
+        base_question = (
+            f"Which task do you mean?\n{options}\n"
+            "Reply with its title, task ID, or a position such as "
+            "'the second one'. Type cancel to stop."
+        )
 
     question = base_question
 
@@ -90,23 +117,47 @@ def choose_candidate(candidates: list[dict]) -> dict:
         })
 
         if not isinstance(answer, str):
-            question = "Please enter a title or ID.\n" + base_question
+            question = "Please reply with text.\n" + base_question
             continue
 
         answer = answer.strip()
 
-        if not answer or len(answer) > 2000:
+        if not 1 <= len(answer) <= 2000:
             question = "Enter 1–2000 characters.\n" + base_question
             continue
 
-        if answer.casefold() in {"cancel", "stop", "none"}:
+        reply = normalize_reply(answer)
+
+        if reply in CANCEL_REPLIES:
             raise RequestCancelled()
 
-        # Accept "7", "#7", or "task 7".
+        if reply in YES_REPLIES:
+            if len(candidates) == 1:
+                return refresh_selected_task(candidates[0])
+
+            question = (
+                "'Yes' does not identify one of these tasks. "
+                "Please choose a title, ID, or position.\n"
+                + base_question
+            )
+            continue
+
+        if reply in POSITIONS:
+            position = POSITIONS[reply]
+
+            if position < len(candidates):
+                return refresh_selected_task(candidates[position])
+
+            question = (
+                "That position is not in the list.\n"
+                + base_question
+            )
+            continue
+
+        # Bare numbers always mean task IDs, not list positions.
         id_match = re.fullmatch(
             r"(?:task\s*)?#?([0-9]+)",
-            answer,
-            flags=re.IGNORECASE,
+            reply,
         )
 
         if id_match:
@@ -116,7 +167,8 @@ def choose_candidate(candidates: list[dict]) -> dict:
                 return refresh_selected_task(by_id[task_id])
 
             question = (
-                "That ID is not one of the offered tasks.\n"
+                "That task ID is not in the list. To select by position, "
+                "say 'the first one', 'the second one', etc.\n"
                 + base_question
             )
             continue
@@ -132,7 +184,7 @@ def choose_candidate(candidates: list[dict]) -> dict:
 
         if len(exact_matches) > 1:
             question = (
-                "Several tasks have that title. Please use an ID.\n"
+                "Several tasks have that title. Use an ID or position.\n"
                 + base_question
             )
             continue
@@ -149,13 +201,12 @@ def choose_candidate(candidates: list[dict]) -> dict:
             return refresh_selected_task(partial_matches[0])
 
         question = (
-            "That reply does not identify one offered task clearly.\n"
+            "I couldn't identify one task from that reply.\n"
             + base_question
         )
 
 
 def resolve_target(action: dict):
-    # 1. Explicit ID.
     if action["task_id"] is not None:
         task = get_task(action["task_id"])
 
@@ -171,12 +222,21 @@ def resolve_target(action: dict):
     if not query:
         raise ValueError("Specify a task title or ID.")
 
+    # Prevent unimplemented bulk requests from becoming a single-task match.
+    if normalize_title(query) in {
+        "all", "all tasks", "all my tasks", "every task",
+        "everything", "my tasks", "these tasks", "those tasks",
+    }:
+        raise ValueError(
+            "Bulk changes are not connected yet. "
+            "Please identify one task for now."
+        )
+
     tasks = list_tasks()
 
     if not tasks:
         raise ValueError("There are no tasks to update or delete.")
 
-    # 2. Unique exact title, ignoring case and punctuation.
     normalized_query = normalize_title(query)
 
     exact_matches = [
@@ -191,14 +251,10 @@ def resolve_target(action: dict):
     if len(exact_matches) > 1:
         return choose_candidate(exact_matches)
 
-    # 3. All meaningful query words appear in the title.
-    # "football task" matches "Play football".
     query_tokens = title_tokens(query)
 
     if not query_tokens:
-        raise ValueError(
-            "Please provide a meaningful task title or an ID."
-        )
+        raise ValueError("Provide a meaningful task title or ID.")
 
     title_matches = [
         task
@@ -210,29 +266,22 @@ def resolve_target(action: dict):
         return refresh_selected_task(title_matches[0])
 
     if len(title_matches) > 1:
-        # Do not use semantic ranking to silently choose between
-        # several plausible title matches.
         return choose_candidate(title_matches)
 
-    # 4. Semantic fallback, using a synchronized index.
     synchronize_index()
     matches = search_tasks(query, limit=20)
 
     if not matches:
         raise ValueError(
-            "No current task matched. Please provide a clearer title or ID."
+            "No current task matched. Provide a clearer title or ID."
         )
 
     best = matches[0]
-
     second_distance = (
-        matches[1]["distance"]
-        if len(matches) > 1
-        else None
+        matches[1]["distance"] if len(matches) > 1 else None
     )
 
     strong_match = best["distance"] <= AUTO_MATCH_MAX_DISTANCE
-
     clearly_separated = (
         second_distance is None
         or second_distance - best["distance"] >= AUTO_MATCH_MIN_GAP
@@ -249,8 +298,8 @@ def resolve_target(action: dict):
 
     if not candidates:
         raise ValueError(
-            "I couldn't confidently match that description to a task. "
-            "Please provide a clearer title or ID."
+            "I couldn't confidently match that description. "
+            "Provide a clearer title or ID."
         )
 
     return choose_candidate(candidates)
