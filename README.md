@@ -68,25 +68,18 @@ uv python install 3.11
 uv sync --locked
 ```
 
-### 3. Configure environment variables
+### Configure the LLM provider
 
-Copy the example configuration:
+Copy `.env.example` to `.env` and configure your provider.
 
-```bash
-cp .env.example .env
-```
+`LLM_PROVIDER` accepts exactly these values:
 
-Edit `.env`:
+| Value | Provider |
+|---|---|
+| `groq` | Groq (default) |
+| `openai` | OpenAI |
+| `openai_compatible` | Another provider with an OpenAI-compatible Chat Completions API |
 
-```dotenv
-GROQ_API_KEY=your_actual_key_here
-GROQ_MODEL=openai/gpt-oss-20b
-SEARCH_MAX_DISTANCE=0.60
-```
-
-Keep the real API key only in `.env`. Never commit it.
-
-The model name is configurable. Your Groq account must have access to the configured model.
 
 ### 4. Start the application
 

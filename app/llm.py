@@ -16,22 +16,45 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
 
 
+def _setting(name: str, default: str = "") -> str:
+    return os.getenv(name, "").strip() or default
+
+
 @lru_cache(maxsize=1)
 def get_interpreter():
-    if not os.getenv("GROQ_API_KEY"):
-        raise RuntimeError("Missing GROQ_API_KEY in .env.")
+    provider = _setting("LLM_PROVIDER", "groq").lower()
+    if provider == "groq":
+        api_key = _setting("LLM_API_KEY") or _setting("GROQ_API_KEY")
+        if not api_key:
+            raise RuntimeError("Set LLM_API_KEY or GROQ_API_KEY in .env for Groq.")
+        model = ChatGroq(
+            api_key=api_key,
+            model=_setting("LLM_MODEL") or _setting("GROQ_MODEL", "openai/gpt-oss-20b"),
+            temperature=0,
+            timeout=30,
+            max_retries=1,
+        )
+        return model.with_structured_output(AgentProposal, method="json_mode")
 
-    model = ChatGroq(
-        model=os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"),
-        temperature=0,
-        timeout=30,
-        max_retries=1,
-    )
+    if provider in {"openai", "openai_compatible"}:
+        from app.compatible_llm import CompatibleInterpreter
 
-    return model.with_structured_output(
-        AgentProposal,
-        method="json_mode",
-    )
+        api_key = _setting("LLM_API_KEY")
+        if provider == "openai":
+            api_key = api_key or _setting("OPENAI_API_KEY")
+        model = _setting("LLM_MODEL")
+        base_url = (
+            "https://api.openai.com/v1"
+            if provider == "openai"
+            else _setting("LLM_BASE_URL")
+        )
+        if not api_key or not model or not base_url:
+            raise RuntimeError(
+                "Set LLM_API_KEY and LLM_MODEL; openai_compatible also requires LLM_BASE_URL."
+            )
+        return CompatibleInterpreter(api_key, model, base_url)
+
+    raise RuntimeError("LLM_PROVIDER must be groq, openai, or openai_compatible.")
 
 
 def build_system_prompt():
