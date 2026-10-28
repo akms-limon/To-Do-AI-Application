@@ -18,6 +18,9 @@ from app.conversation import (
     clarified_values,
     proposal_for,
     simple_change,
+    simple_request,
+    starts_new_request,
+    exceeds_action_limit,
     validate_id_sources,
     refers_to_pending_group,
 )
@@ -58,6 +61,7 @@ class AgentState(TypedDict, total=False):
     pending_targets: list[dict]
     group_confirmation: bool
     target_authority: str
+    preparation_failures: int
 
 
 def initial_state(message, request_id, memory=None):
@@ -83,14 +87,24 @@ def initial_state(message, request_id, memory=None):
         pending_targets=[],
         group_confirmation=False,
         target_authority="",
+        preparation_failures=0,
     )
 
 
 def interpret_node(state):
     message = state["message"]
+    if exceeds_action_limit(message):
+        return {
+            "proposal": None,
+            "prepared_actions": [],
+            "execution_result": None,
+            "execution_error": None,
+            "reply": "This request contains more than five actions. Nothing was changed. Please complete the existing task in one request, then create up to five tasks in another request.",
+            "next_node": "finish",
+        }
     memory = state.get("memory", {})
     pending_targets = state.get("pending_targets", [])
-    direct = simple_change(message)
+    direct = simple_request(message)
     data = proposal_for(direct) if direct else None
     # Completed-task IDs are useful only for references. Never present them as
     # possible replacements for a newly named target.
@@ -112,6 +126,15 @@ def interpret_node(state):
             message, history=state.get("history", []), context=context
         )
         data = proposal.model_dump(mode="json")
+    if len(data.get("actions", [])) > 5:
+        return {
+            "proposal": None,
+            "prepared_actions": [],
+            "execution_result": None,
+            "execution_error": None,
+            "reply": "This request contains more than five actions. Nothing was changed. Please split it into requests of at most five actions (for example, complete the task first, then create the five meeting tasks).",
+            "next_node": "finish",
+        }
     outcome = data["outcome"]
     # If the only uncertainty is target identity, let the real resolver check it.
     if (
@@ -388,7 +411,19 @@ def prepare_node(state):
             }
         return {"prepared_actions": prepared, "next_node": "execute"}
     except ValueError as error:
-        return clarification(str(error))
+        failures = state.get("preparation_failures", 0) + 1
+        if failures >= 2:
+            return {
+                "proposal": None,
+                "prepared_actions": [],
+                "execution_result": None,
+                "execution_error": None,
+                "preparation_failures": 0,
+                "reply": "I couldn't prepare a valid action after your correction. No changes were made. I've cleared the pending request; please send the complete instruction again. Details: "
+                + str(error),
+                "next_node": "finish",
+            }
+        return {**clarification(str(error)), "preparation_failures": failures}
 
 
 def await_reply_node(state):
@@ -435,11 +470,32 @@ def handle_reply(state, answer):
     if state["mode"] == "confirm" and reply in YES_REPLIES:
         return {"approved": True, "next_node": "execute"}
     # Clear named instructions are replacements, not candidate answers.
-    direct = simple_change(answer)
+    direct = simple_request(answer)
     if direct:
         return replan(
-            state, [direct], history=[], pending_targets=[], target_authority=""
+            state,
+            [direct],
+            history=[],
+            pending_targets=[],
+            target_authority="",
+            preparation_failures=0,
         )
+    if starts_new_request(answer):
+        return {
+            "message": answer,
+            "history": [],
+            "proposal": None,
+            "prepared_actions": [],
+            "candidates": [],
+            "pending_targets": [],
+            "question": "",
+            "cursor": 0,
+            "approved": False,
+            "group_confirmation": False,
+            "target_authority": "",
+            "preparation_failures": 0,
+            "next_node": "interpret",
+        }
     if state["mode"] in {"select", "select_execute"}:
         candidates = state["candidates"]
         try:

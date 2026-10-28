@@ -18,9 +18,12 @@ def validate_action(raw: dict) -> dict:
         operation = action.operation
         if operation == "list_tasks" and query is not None:
             operation = "search_tasks"
-        action = action.model_copy(
-            update={"operation": operation, "target_query": query}
-        )
+        updates = {"operation": operation, "target_query": query}
+        # "All" and "matching" only describe an ordinary filtered read here.
+        # Never discard reference scopes: those refer to a specific earlier set.
+        if action.scope in {"all", "matching"} and action.reference is None:
+            updates["scope"] = "single"
+        action = action.model_copy(update=updates)
 
     operation = action.operation
     filters = action.filters
@@ -36,7 +39,9 @@ def validate_action(raw: dict) -> dict:
     if action.scope == "matching" and not (filters or action.target_query):
         raise ValueError("Matching scope requires filters or a description.")
     if action.scope == "references" and not action.reference:
-        raise ValueError("Identify pending_targets, last_tasks or last_results for contextual targets.")
+        raise ValueError(
+            "Identify pending_targets, last_tasks or last_results for contextual targets."
+        )
     if action.reference and action.scope != "references":
         raise ValueError("Reference requires references scope.")
 

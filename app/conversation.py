@@ -192,3 +192,76 @@ def refers_to_pending_group(message):
     return bool(
         re.search(r"\b(both|them|their|those|these)\b", message, re.I)
     ) and not re.search(r"\b(?:all|every)\s+(?:my\s+)?tasks?\b", message, re.I)
+
+
+def simple_request(message):
+    """Exact read commands and plain named creations; never parse a partial batch."""
+    text = normalize_reply(message)
+    if text in {
+        "show me all tasks",
+        "show all tasks",
+        "list all tasks",
+        "list tasks",
+        "show my tasks",
+        "show all my tasks",
+        "show me all my tasks",
+        "sob task dekhao",
+        "sob task dekhao amar",
+        "সব টাস্ক দেখাও",
+    }:
+        return {"operation": "list_tasks", "filters": {}}
+    match = re.fullmatch(
+        r"(?:please\s+)?create\s+(?:a\s+)?task\s+(?:named|nammed|called)\s*:?\s*(.+)",
+        message.strip(),
+        re.I,
+    )
+    if match:
+        title = match[1].strip().rstrip(".").strip()
+        # Additional clauses/fields need full interpretation, not title-only creation.
+        if title and not re.search(
+            r"\b(and|then|with|priority|status|due|tomorrow|today|deadline|description|instead)\b|[;\n]",
+            title,
+            re.I,
+        ):
+            return {"operation": "create_task", "values": {"title": title.strip('"')}}
+    return simple_change(message)
+
+
+def starts_new_request(message):
+    # A creation imperative is a new request, not an answer selecting an old task.
+    return bool(re.match(r"^(?:please\s+)?create\b", message.strip(), re.I))
+
+
+def exceeds_action_limit(message):
+    """Conservative preflight for explicit counted creations, not arbitrary prose."""
+    numbers = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+    match = re.search(
+        r"\bcreate\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+[^.;\n]*?\btasks?\b",
+        message,
+        re.I,
+    )
+    if not match:
+        return False
+    word = match[1].casefold()
+    count = int(word) if word.isdigit() else numbers[word]
+    if count > 5:
+        return True
+    prefix = message[: match.start()]
+    return (
+        count == 5
+        and bool(
+            re.search(r"\b(complete|update|delete|change|mark|move)\b", prefix, re.I)
+        )
+        and bool(re.search(r"\b(and|then)\b", prefix, re.I))
+    )

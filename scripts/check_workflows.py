@@ -798,6 +798,111 @@ class Workflows(unittest.TestCase):
         self.reply("cancel")
         self.assertTrue(all(get_task(t["id"]) for t in created))
 
+    def test_show_all_tasks_no_model_call(self):
+        result = self.direct("show me all tasks")
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(len(result["execution_result"]["results"][0]["tasks"]), 2)
+        self.assertEqual(self.contexts, [])
+
+    def test_listing_replaces_pending_deletion_without_cancel(self):
+        self.start(proposal(action("delete_task", scope="all")))
+        result = self.reply("show me all tasks")
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(len(list_tasks()), 2)
+        self.assertEqual(
+            result["execution_result"]["results"][0]["operation"], "list_tasks"
+        )
+
+    def test_named_creation_discards_stale_target(self):
+        self.start(
+            proposal(
+                action("create_task", task_id=self.first["id"], values={"title": "Bad"})
+            )
+        )
+        result = self.reply("Create a task nammed Argent meeting")
+        self.assertNotIn("__interrupt__", result)
+        self.assertEqual(
+            result["execution_result"]["results"][0]["task"]["title"], "Argent meeting"
+        )
+        self.assertEqual(len(list_tasks()), 3)
+
+    def test_complex_creation_has_clean_context(self):
+        self.start(proposal(action("delete_task", scope="all")))
+        self.queue.append(
+            proposal(
+                action("create_task", values={"title": "Meeting", "priority": "high"})
+            )
+        )
+        result = self.reply("Create a task called Meeting with high priority")
+        self.assertNotIn("__interrupt__", result)
+        _, history, context = self.contexts[-1]
+        self.assertEqual(history, [])
+        self.assertIsNone(context["pending_proposal"])
+        self.assertEqual(context["pending_targets"], [])
+        self.assertEqual(len(list_tasks()), 3)
+
+    def test_repeated_invalid_proposal_exits_loop(self):
+        bad = proposal(
+            action("create_task", target_query="old task", values={"title": "Meeting"})
+        )
+        self.start(bad)
+        self.queue.append(bad)
+        result = self.reply("Argent meeting")
+        self.assertNotIn("__interrupt__", result)
+        self.assertIn("cleared the pending request", result["reply"])
+        self.assertIsNone(result["proposal"])
+        self.assertEqual(len(list_tasks()), 2)
+
+    def test_six_action_batch_rejected_before_any_write(self):
+        large = proposal(
+            action(task_id=self.first["id"], values={"status": "done"}),
+            *[action("create_task", values={"title": "Meeting"}) for _ in range(5)],
+        )
+        result = self.start(large)
+        self.assertNotIn("__interrupt__", result)
+        self.assertIn("more than five", result["reply"])
+        self.assertEqual(len(list_tasks()), 2)
+        self.assertEqual(get_task(self.first["id"])["status"], "to_do")
+
+    def test_read_scope_normalization_preserves_filters(self):
+        result = validate_action(
+            action("list_tasks", scope="all", filters={"status": "unfinished"})
+        )
+        self.assertEqual(result["scope"], "single")
+        self.assertEqual(result["filters"], {"status": "unfinished"})
+        result = validate_action(
+            action(
+                "list_tasks",
+                scope="matching",
+                target_query="Gulshan",
+                filters={"status": "unfinished"},
+            )
+        )
+        self.assertEqual(result["operation"], "search_tasks")
+        self.assertEqual(result["target_query"], "Gulshan")
+
+    def test_reference_listing_does_not_broaden_to_all(self):
+        with self.assertRaises(ValueError):
+            validate_action(
+                action("list_tasks", scope="references", reference="last_results")
+            )
+        with self.assertRaises(ValueError):
+            validate_action(action("list_tasks", scope="all", reference="last_results"))
+
+    def test_creation_shortcut_does_not_swallow_second_action(self):
+        from app.conversation import simple_request
+
+        self.assertIsNone(
+            simple_request("Create a task named Meeting and delete Football")
+        )
+
+    def test_counted_batch_limit_before_model_call(self):
+        result = self.direct("Malay related task complete and create 5 meeting task")
+        self.assertNotIn("__interrupt__", result)
+        self.assertIn("more than five", result["reply"])
+        self.assertEqual(self.contexts, [])
+        self.assertEqual(len(list_tasks()), 2)
+
 
 class EmptyContainerNormalization(unittest.TestCase):
     def test_null_containers_normalize(self):
@@ -897,7 +1002,7 @@ class SearchNormalization(unittest.TestCase):
             dict(values={"priority": "high"}),
             dict(filters={"status": "invalid"}),
             dict(task_id=7),
-            dict(scope="all"),
+            dict(scope="references", reference="last_results"),
         ]:
             with self.assertRaises(ValueError):
                 validate_action(action("list_tasks", target_query="Gulshan", **extra))

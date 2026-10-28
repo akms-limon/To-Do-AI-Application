@@ -79,7 +79,9 @@ class AgentProposal(BaseModel):
 
     actions: list[ActionProposal] = Field(
         default_factory=list,
-        max_length=5,
+        # Parse bounded oversized batches so the graph can explain the five-action
+        # execution limit without a parser-error/retry loop.
+        max_length=100,
     )
 
     message: str = Field(
