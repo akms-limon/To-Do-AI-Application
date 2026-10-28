@@ -31,10 +31,19 @@ correct, because even an unrelated task can rank first.
 
 ## Prompt-4: Handle clarification based on the reply of a user or Context resoning
 
-Ai assistant jokhon ekta task dekhaye ‘Is this the task you mean?’ jiggesh korbe
-tokhon user ‘yes’ bolle oi task-ta select korbe abar title ba ID chaibe na. Ekadhik
-candidate thakle shudhu ‘yes’ diye select korbe na; konta bojhachhe seta clear korbe. User priority ba description diye task identify korte chaileo ager conversation-er context dhore request-ta resolve korbe. Multiple task delete howar possibility thakle affected task-gulo dekhaye confirmation nibe. Guess kore kono task change/delete korbe na.”
+### Prompt:
+Ai assistant jokhon akta specific task diye jigges korbe - ‘Is this the task you mean?’
+Tokhon user ‘yes’ bolle oi task-ta select korbe ebong appropriate action nibe. Like
+Context bujhe kaj korbe, all time jeno ID na dite hoy. Jemon keu jodi bole amar presantation
+er task ta modify kore Priority high kore dao. Se presantation er task er priority high kore
+dibe kono title ba ID jigges korbe na. Ekadhik candidate thakle shudhu ‘yes’ diye select
+korbe na. konta bojhachhe seta clear korbe. User priority ba description diye task identify
+korte chaileo ager conversation-er context dhore request-ta resolve korbe. Multiple task
+delete howar possibility thakle affected task-gulo dekhaye confirmation nibe. Guess kore
+kono task change ba delete korbe na.
 
-Failure: Ekta candidate dekhানোর por-o yes accept koreni; eki title/ID question repeat koreche. Priority diye delete request-o resolve korte pareni.
+### Failure encountered:
+When the assistant asked me to confirm a task, it didn’t accept “yes.” Instead, it repeatedly asked for the task’s title or ID.
 
-Planned correction: Context-aware confirmation, filter-based target resolution, ar ambiguous/bulk operation-er jonno clear confirmation flow. Implementation ekhono pending.
+### Planned correction:
+Context-aware confirmation, filter-based target resolution, and ambiguous operation confirmation flow.

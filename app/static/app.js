@@ -263,5 +263,20 @@ if (pendingRequest) {
   );
 }
 
+messageInput.addEventListener("keydown", (event) => {
+  if (
+    event.key === "Enter" &&
+    !event.shiftKey &&
+    !event.isComposing &&
+    event.keyCode !== 229
+  ) {
+    event.preventDefault();
+
+    if (!sending && !sendButton.disabled) {
+      chatForm.requestSubmit(sendButton);
+    }
+  }
+});
+
 updateComposer();
 loadTasks();
