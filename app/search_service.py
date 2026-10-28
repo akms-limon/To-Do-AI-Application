@@ -4,8 +4,7 @@ from pathlib import Path
 import chromadb
 
 from app.embeddings import embed_texts
-from app.repository import get_task, list_tasks
-
+from app.repository import list_tasks
 
 CHROMA_PATH = Path(__file__).resolve().parents[1] / "data" / "chroma"
 
@@ -102,37 +101,6 @@ def search_tasks(query: str, limit: int = 5):
     if not 1 <= limit <= 20:
         raise ValueError("Search limit must be between 1 and 20.")
 
-    collection = get_collection()
-    count = collection.count()
+    from app.read_service import semantic_search
 
-    if count == 0:
-        return []
-
-    results = collection.query(
-        query_embeddings=embed_texts([query]),
-        n_results=min(limit, count),
-        include=["distances", "metadatas"],
-    )
-
-    matches = []
-
-    for task_id, distance, metadata in zip(
-        results["ids"][0],
-        results["distances"][0],
-        results["metadatas"][0],
-    ):
-        task = get_task(int(task_id))
-
-        # SQLite is authoritative: ignore deleted or outdated entries.
-        if task is None:
-            continue
-
-        if metadata["version"] != task["version"]:
-            continue
-
-        matches.append({
-            "task": task,
-            "distance": float(distance),
-        })
-
-    return matches
+    return semantic_search(query, {}, limit=limit)

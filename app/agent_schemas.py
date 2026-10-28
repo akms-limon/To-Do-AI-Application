@@ -17,13 +17,16 @@ class ActionProposal(BaseModel):
     task_id: int | None = Field(
         default=None,
         gt=0,
-        description="Only an ID explicitly provided by the user.",
+        description="Only an ID explicitly provided by the user or present in supplied reference context.",
     )
 
     target_query: str | None = Field(
         default=None,
         description="Task description to resolve, or semantic search query.",
     )
+
+    scope: Literal["single", "all", "matching", "references"] = "single"
+    reference: Literal["last_tasks", "last_results"] | None = None
 
     values: dict[str, str | None] = Field(
         default_factory=dict,
@@ -37,16 +40,14 @@ class ActionProposal(BaseModel):
     filters: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "Listing/search filters. Allowed keys: status, priority, due_date. "
+            "Current-property target or listing/search filters. Allowed keys: status, priority, due_date. "
             "Status can also be unfinished."
         ),
     )
 
     @model_validator(mode="after")
     def check_field_names(self):
-        allowed_values = {
-            "title", "description", "status", "priority", "due_date"
-        }
+        allowed_values = {"title", "description", "status", "priority", "due_date"}
         allowed_filters = {"status", "priority", "due_date"}
 
         if not set(self.values).issubset(allowed_values):

@@ -9,10 +9,10 @@ def main():
     matches = search_tasks(query)
 
     if not matches:
-        print("No current indexed candidates found.")
+        print("No relevant tasks found.")
         return
 
-    print("\nNearest candidates:")
+    print("\nRelevant candidates (up to 5):")
     for match in matches:
         task = match["task"]
 

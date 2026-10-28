@@ -48,11 +48,13 @@ def execute_read_only(actions: list[dict]):
             with connection() as conn:
                 tasks = list_filtered_tasks(conn, action["filters"])
 
-            results.append({
-                "operation": operation,
-                "tasks": tasks,
-                "message": format_task_list(tasks),
-            })
+            results.append(
+                {
+                    "operation": operation,
+                    "tasks": tasks,
+                    "message": format_task_list(tasks),
+                }
+            )
 
         elif operation == "search_tasks":
             matches = semantic_search(
@@ -60,11 +62,13 @@ def execute_read_only(actions: list[dict]):
                 action["filters"],
             )
 
-            results.append({
-                "operation": operation,
-                "matches": matches,
-                "message": format_search_results(matches),
-            })
+            results.append(
+                {
+                    "operation": operation,
+                    "matches": matches,
+                    "message": format_search_results(matches),
+                }
+            )
 
     return {"results": results}
 
@@ -73,8 +77,8 @@ def execute_changes(request_id: str, actions: list[dict]):
     if not request_id:
         raise ValueError("Missing request ID.")
 
-    if not 1 <= len(actions) <= 5:
-        raise ValueError("Provide between one and five actions.")
+    if not 1 <= len(actions) <= 100:
+        raise ValueError("Provide between one and 100 prepared actions.")
 
     actions_json = json.dumps(actions, sort_keys=True)
 
@@ -93,24 +97,15 @@ def execute_changes(request_id: str, actions: list[dict]):
 
             return json.loads(previous["result_json"])
 
-    validated = [
-        validate_prepared_action(action)
-        for action in actions
-    ]
+    validated = [validate_prepared_action(action) for action in actions]
 
-    mutation_operations = {
-        "create_task", "update_task", "delete_task"
-    }
+    mutation_operations = {"create_task", "update_task", "delete_task"}
 
     has_mutations = any(
-        action["operation"] in mutation_operations
-        for action in validated
+        action["operation"] in mutation_operations for action in validated
     )
 
-    has_search = any(
-        action["operation"] == "search_tasks"
-        for action in validated
-    )
+    has_search = any(action["operation"] == "search_tasks" for action in validated)
 
     if not has_mutations:
         return execute_read_only(validated)
@@ -148,9 +143,7 @@ def execute_changes(request_id: str, actions: list[dict]):
                 expected = action.get("expected_version")
 
                 if type(expected) is not int or expected < 1:
-                    raise ValueError(
-                        f"Missing or invalid version for task #{task_id}."
-                    )
+                    raise ValueError(f"Missing or invalid version for task #{task_id}.")
 
                 if task_id in initial_versions:
                     if initial_versions[task_id] != expected:
@@ -167,9 +160,7 @@ def execute_changes(request_id: str, actions: list[dict]):
             ).fetchone()
 
             if row is None:
-                raise ExecutionConflict(
-                    f"Task #{task_id} no longer exists."
-                )
+                raise ExecutionConflict(f"Task #{task_id} no longer exists.")
 
             if row["version"] != expected:
                 raise ExecutionConflict(
@@ -186,17 +177,19 @@ def execute_changes(request_id: str, actions: list[dict]):
             if operation == "list_tasks":
                 tasks = list_filtered_tasks(conn, action["filters"])
 
-                results.append({
-                    "operation": operation,
-                    "tasks": tasks,
-                    "message": format_task_list(tasks),
-                })
+                results.append(
+                    {
+                        "operation": operation,
+                        "tasks": tasks,
+                        "message": format_task_list(tasks),
+                    }
+                )
                 continue
 
             if operation == "create_task":
-                values = TaskCreate.model_validate(
-                    action["values"]
-                ).model_dump(mode="json")
+                values = TaskCreate.model_validate(action["values"]).model_dump(
+                    mode="json"
+                )
 
                 cursor = conn.execute(
                     """
@@ -224,13 +217,15 @@ def execute_changes(request_id: str, actions: list[dict]):
                     (task_id,),
                 ).fetchone()
 
-                results.append({
-                    "operation": operation,
-                    "task": dict(row),
-                    "message": (
-                        f"Created task #{task_id}: {row['title']}."
-                    ),
-                })
+                results.append(
+                    {
+                        "operation": operation,
+                        "task": dict(row),
+                        "message": (
+                            f"Created task #{task_id}: {row['title']} | {row['status']} | {row['priority']} priority | Due: {row['due_date'] or 'none'}."
+                        ),
+                    }
+                )
                 continue
 
             task_id = action["task_id"]
@@ -251,29 +246,26 @@ def execute_changes(request_id: str, actions: list[dict]):
                     (task_id,),
                 )
 
-                results.append({
-                    "operation": operation,
-                    "task_id": task_id,
-                    "message": (
-                        f"Deleted task #{task_id}: {row['title']}."
-                    ),
-                })
+                results.append(
+                    {
+                        "operation": operation,
+                        "task_id": task_id,
+                        "message": (f"Deleted task #{task_id}: {row['title']}."),
+                    }
+                )
                 continue
 
-            values = TaskUpdate.model_validate(
-                action["values"]
-            ).model_dump(mode="json", exclude_unset=True)
+            values = TaskUpdate.model_validate(action["values"]).model_dump(
+                mode="json", exclude_unset=True
+            )
 
-            changes = {
-                key: value
-                for key, value in values.items()
-                if row[key] != value
-            }
+            changes = {key: value for key, value in values.items() if row[key] != value}
 
             if changes:
-                assignments = ", ".join(
-                    f"{key} = ?" for key in changes
+                change_summary = "; ".join(
+                    f"{key}: {row[key]} → {value}" for key, value in changes.items()
                 )
+                assignments = ", ".join(f"{key} = ?" for key in changes)
 
                 conn.execute(
                     f"""
@@ -291,19 +283,17 @@ def execute_changes(request_id: str, actions: list[dict]):
                     (task_id,),
                 ).fetchone()
 
-                message = (
-                    f"Updated task #{task_id}: {row['title']}."
-                )
+                message = f"Updated task #{task_id}: {row['title']} — {change_summary}."
             else:
-                message = (
-                    f"Task #{task_id} already has those values."
-                )
+                message = f"Task #{task_id} already has those values."
 
-            results.append({
-                "operation": operation,
-                "task": dict(row),
-                "message": message,
-            })
+            results.append(
+                {
+                    "operation": operation,
+                    "task": dict(row),
+                    "message": message,
+                }
+            )
 
         result = {"results": results}
 

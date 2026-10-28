@@ -19,14 +19,29 @@ const priorityLabels = {
   high: "High",
 };
 
-const THREAD_KEY = "taskflow-thread";
-const PENDING_KEY = "taskflow-pending-message";
+const THREAD_KEY = "taskflow-v2-thread";
+const PENDING_KEY = "taskflow-v2-pending-message";
 
 let threadId = sessionStorage.getItem(THREAD_KEY);
 
 if (!threadId) {
   threadId = crypto.randomUUID();
   sessionStorage.setItem(THREAD_KEY, threadId);
+}
+
+const TRANSCRIPT_KEY = "taskflow-v2-transcript";
+let restoredTranscript = [];
+try {
+  const stored = JSON.parse(sessionStorage.getItem(TRANSCRIPT_KEY) || "[]");
+  if (Array.isArray(stored)) restoredTranscript = stored;
+} catch { sessionStorage.removeItem(TRANSCRIPT_KEY); }
+
+function saveTranscript() {
+  const transcript = [...messages.querySelectorAll(".message")].slice(-60).map((element) => ({
+    text: element.textContent,
+    role: element.classList.contains("user-message") ? "user" : "assistant",
+  }));
+  try { sessionStorage.setItem(TRANSCRIPT_KEY, JSON.stringify(transcript)); } catch { /* Storage may be full. */ }
 }
 
 let pendingRequest = null;
@@ -197,6 +212,7 @@ async function submitPendingRequest() {
     console.error(error);
   } finally {
     sending = false;
+    saveTranscript();
     updateComposer();
     await loadTasks();
 
@@ -238,6 +254,7 @@ chatForm.addEventListener("submit", async (event) => {
   );
 
   addMessage(text, "user");
+  saveTranscript();
   messageInput.value = "";
 
   await submitPendingRequest();
@@ -249,13 +266,19 @@ messageInput.addEventListener("input", () => {
 
 refreshButton.addEventListener("click", loadTasks);
 
+for (const item of restoredTranscript) {
+  if (typeof item.text === "string" && ["user", "assistant"].includes(item.role)) {
+    addMessage(item.text, item.role);
+  }
+}
+
 if (pendingRequest) {
   addMessage(
     "An unanswered submission was restored. Click Retry to retrieve or " +
     "complete that same request before sending another.",
     "assistant"
   );
-} else {
+} else if (restoredTranscript.length === 0) {
   addMessage(
     "Welcome to TaskFlow. Ask me to create, update, list, or search tasks. " +
     "If I need clarification, reply here.",
