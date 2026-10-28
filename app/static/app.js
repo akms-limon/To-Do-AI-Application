@@ -6,6 +6,7 @@ const messages = document.querySelector("#messages");
 const chatForm = document.querySelector("#chat-form");
 const messageInput = document.querySelector("#message-input");
 const sendButton = chatForm.querySelector('button[type="submit"]');
+const cancelButton = document.querySelector("#cancel-button");
 
 const statusLabels = {
   to_do: "To do",
@@ -155,11 +156,31 @@ async function loadTasks() {
 function updateComposer() {
   messageInput.disabled = sending || pendingRequest !== null;
   sendButton.disabled = sending;
+  cancelButton.hidden = !pendingRequest || sending;
+  cancelButton.disabled = sending;
   sendButton.textContent = sending
     ? "Working…"
     : pendingRequest
       ? "Retry"
       : "Send";
+}
+
+function cancelPendingRequest() {
+  if (sending || !pendingRequest) {
+    return;
+  }
+
+  pendingRequest = null;
+  sessionStorage.removeItem(PENDING_KEY);
+
+  // Abandon the failed workflow checkpoint so a new message starts cleanly.
+  threadId = crypto.randomUUID();
+  sessionStorage.setItem(THREAD_KEY, threadId);
+
+  addMessage("The previous request was cancelled. You can send a new instruction.", "assistant");
+  saveTranscript();
+  updateComposer();
+  messageInput.focus();
 }
 
 async function submitPendingRequest() {
@@ -264,6 +285,7 @@ messageInput.addEventListener("input", () => {
   messageInput.setCustomValidity("");
 });
 
+cancelButton.addEventListener("click", cancelPendingRequest);
 refreshButton.addEventListener("click", loadTasks);
 
 for (const item of restoredTranscript) {

@@ -412,9 +412,26 @@ textarea {
 textarea::placeholder { color: var(--ink-faint); }
 textarea:focus { border-color: var(--accent); }
 
+.chat-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .chat-form button {
   justify-self: end;
   padding: 10px 26px;
+}
+
+#cancel-button {
+  background: var(--surface);
+  color: var(--ink-soft);
+  border: 1px solid var(--line);
+}
+
+#cancel-button:hover {
+  background: var(--surface-alt);
+  border-color: #c4cee0;
 }
 
 /* ---------- Responsive ---------- */
