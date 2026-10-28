@@ -216,7 +216,6 @@ app/
 ├── read_service.py         # Filtered listing and retrieval
 └── static/                 # Frontend files
 
-scripts/                    # Checks and maintenance utilities
 prompts.md                  # Development prompts, failures and corrections
 .env.example                # Configuration placeholders
 pyproject.toml              # Project dependencies
