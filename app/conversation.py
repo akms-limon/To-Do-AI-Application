@@ -55,6 +55,21 @@ def simple_change(message):
     """Only full, unambiguous single-change English forms; otherwise return None."""
     text = message.strip().rstrip(".!?").strip()
     text = re.sub(r"^please\s+", "", text, flags=re.I)
+    delete_match = re.fullmatch(
+        r"(?:delete|remove) (?:the )?task(?: has)? (?:id\s+|#)(\d+)",
+        text,
+        flags=re.I,
+    ) or re.fullmatch(r"(?:delete|remove) (?:the )?task\s+#?(\d+)", text, flags=re.I)
+    if delete_match:
+        return {
+            "operation": "delete_task",
+            "task_id": int(delete_match[1]),
+            "target_query": None,
+            "scope": "single",
+            "reference": None,
+            "values": {},
+            "filters": {},
+        }
     patterns = [
         (
             rf"(?:change|set|update) (?:the )?priority of (.+?) to ({PRIORITIES})",
@@ -129,7 +144,10 @@ def target_evidence(message, history):
 
 
 def explicit_ids(text):
-    return {int(m.group(1)) for m in re.finditer(r"(?:#|\btask\s+)(\d+)\b", text, re.I)}
+    return {
+        int(m.group(1))
+        for m in re.finditer(r"(?:#|\btask\s+|\bid\s+)(\d+)\b", text, re.I)
+    }
 
 
 def validate_id_sources(actions, message, history, memory, pending_targets):
@@ -210,11 +228,34 @@ def simple_request(message):
         "সব টাস্ক দেখাও",
     }:
         return {"operation": "list_tasks", "filters": {}}
+    if text in {
+        "clear all tasks",
+        "delete all tasks",
+        "remove all tasks",
+        "clear all my tasks",
+        "delete all my tasks",
+        "remove all my tasks",
+    }:
+        return {
+            "operation": "delete_task",
+            "task_id": None,
+            "target_query": None,
+            "scope": "all",
+            "reference": None,
+            "values": {},
+            "filters": {},
+        }
     match = re.fullmatch(
         r"(?:please\s+)?create\s+(?:a\s+)?task\s+(?:named|nammed|called)\s*:?\s*(.+)",
         message.strip(),
         re.I,
     )
+    if not match:
+        match = re.fullmatch(
+            r"(?:please\s+)?create\s+(?:a\s+)?task\s+(.+)",
+            message.strip(),
+            re.I,
+        )
     if match:
         title = match[1].strip().rstrip(".").strip()
         # Additional clauses/fields need full interpretation, not title-only creation.

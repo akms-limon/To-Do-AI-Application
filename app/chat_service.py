@@ -113,9 +113,8 @@ def handle_chat(payload):
                             config,
                         )
                     elif snapshot.next:
-                        raise ChatServiceError(
-                            409, "A workflow is unfinished. Retry its original message."
-                        )
+                        # Resume the same checkpoint after a transient workflow failure.
+                        result = graph.invoke(None, config)
                     else:
                         result = graph.invoke(
                             initial_state(
